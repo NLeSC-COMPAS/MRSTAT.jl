@@ -46,9 +46,11 @@ using BlochSimulators
 using CUDA
 using StructArrays: StructArray
 using ComputationalResources: CUDALibs
+using PythonCall: PythonCall, Py, pyimport, pyconvert, pywith, pydict, pylist
+using NeuralBloch: torch, to_torch, from_torch, on_task_stream
 using ..DerivativeOperations: ∂mˣʸ∂T₁T₂
 
-export ForwardModel, BlochModel,
+export ForwardModel, BlochModel, SurrogateModel, load_surrogate,
        compute_echos, compute_echos_and_derivatives, nechos,
        default_bounds, check_experiment
 
@@ -140,5 +142,8 @@ function compute_echos_and_derivatives(m::BlochModel, parameters)
     ∂echos = StructArray{∂mˣʸ∂T₁T₂{eltype(echos)}}((∂.T₁, ∂.T₂))
     return echos, ∂echos
 end
+
+# The learned forward model (SurrogateModel + load_surrogate).
+include("surrogate.jl")
 
 end # module ForwardModels
