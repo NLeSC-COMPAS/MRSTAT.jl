@@ -95,14 +95,23 @@ end
     θ = Δk * x
     # B₀ rotation per sample point
     θ += (hasB₀(p) ? Δt*π*p.B₀*2 : 0)
-    # "Rewind" to start of readout
-    R = exp((ns÷2)*Δt*R₂ - im*(ns÷2)*θ)
+    # This kernel walks each readout sample by sample. One step forward in
+    # time is exp(-Δt·R₂ - i·θ): T₂ decay plus the readout-gradient rotation
+    # in the exp(-i·k·x) k-space convention — the same convention the cost
+    # side (BlochSimulators' magnetization_to_signal, FFT convention since
+    # its v0.8, commit 357746b) uses. R below "rewinds" from the echo time
+    # to the start of the readout, so it is that step's inverse. The
+    # Jacobian must live in the same convention as the residual, or the
+    # gradient stops being the derivative of the actual cost. (Only the
+    # phase signs are convention-dependent; the T₂-derivative factors are
+    # the same either way.)
+    R = exp((ns÷2)*Δt*R₂ + im*(ns÷2)*θ)
     ∂R = ∂mˣʸ∂T₁T₂(0, -(ns÷2)*Δt*R₂*R₂*R)
 
     ∂mₛ = ∂mₑ * R + mₑ * ∂R
     mₛ = mₑ * R
     # T₂ decay and gradient- and B₀ induced rotation per sample
-    E₂eⁱᶿ = exp(-Δt*R₂ + im*θ)
+    E₂eⁱᶿ = exp(-Δt*R₂ - im*θ)
     ∂E₂eⁱᶿ = ∂mˣʸ∂T₁T₂(0, Δt*R₂*R₂*E₂eⁱᶿ)
 
     for sample in 1:ns

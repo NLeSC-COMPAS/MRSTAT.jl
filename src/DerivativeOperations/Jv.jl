@@ -76,10 +76,17 @@ end
     # There are ns samples per readout, echo time is assumed to occur
     # at index (ns÷2)+1. Now compute sample index relative to the echo time
     s = sample_idx - ((ns÷2)+1)
-    # Apply readout gradient, T₂ decay and B₀ rotation
+    # Walk from the echo time to this sample point: apply the readout
+    # gradient rotation, T₂ decay and B₀ rotation. The gradient phase must
+    # use exp(-i·k·x) — the same k-space sign convention the cost side
+    # (BlochSimulators' magnetization_to_signal, FFT convention since its
+    # v0.8, commit 357746b) uses to build the residual. Cost and Jacobian
+    # must describe one and the same forward model; with mismatched signs
+    # the "descent" direction actually increases the cost and the solver
+    # stalls (observed before this line was aligned).
     θ = Δkₓ * x
     hasB₀(p) && (θ += π*p.B₀*Δt*2)
-    E₂eⁱᶿ = exp(-s*Δt*R₂ + im*s*θ)
+    E₂eⁱᶿ = exp(-s*Δt*R₂ - im*s*θ)
 
     ∂E₂eⁱᶿ = ∂mˣʸ∂T₁T₂(0, (s*Δt)*R₂*R₂*E₂eⁱᶿ)
 

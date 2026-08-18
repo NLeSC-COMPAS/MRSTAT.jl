@@ -43,7 +43,6 @@ function objective(optimpars::Vector{<:Real}, resource, mode, raw_data, sequence
         ∂echos = simulate_derivatives(echos, resource, sequence, parameters)
 
         # Apply phase encoding
-        @show typeof(coordinates)
         phase_encoding!(echos, trajectory, coordinates)
         phase_encoding!(∂echos, trajectory, coordinates)
 
