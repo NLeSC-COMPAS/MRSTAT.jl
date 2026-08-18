@@ -1,0 +1,14 @@
+[deps]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+BlochSimulators = "2c9a3a5d-4a8d-4ca7-a6c9-04a38836deab"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+ComputationalResources = "ed09eef8-17a6-5b46-8889-db040fac31e3"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+Aqua = "0.8"
