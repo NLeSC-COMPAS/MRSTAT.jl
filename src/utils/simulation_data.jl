@@ -61,6 +61,13 @@ function generate_simulation_data(; N=224, K=5)
 
     raw_data = simulate_signal(resource, sequence, phantom, trajectory, coordinates, coil_sensitivities)
 
-    return raw_data, sequence, coordinates, coil_sensitivities, trajectory
+    # Transmit field (per-voxel B₁ map): a fixed input the reconstruction
+    # needs (`mrstat_recon` builds its tissue parameters from it) but not a
+    # reconstructed quantity. The phantom above carries no B₁ and the data
+    # was simulated without one, so a uniform map keeps the reconstruction's
+    # forward model consistent with the data.
+    transmit_field = ones(Float32, N^2)
+
+    return raw_data, sequence, coordinates, coil_sensitivities, trajectory, transmit_field
 end
 
