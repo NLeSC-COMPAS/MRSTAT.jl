@@ -2,3 +2,4 @@
 .CondaPkg
 .git
 # Manifest.toml
+scripts/output/
