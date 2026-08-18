@@ -13,7 +13,12 @@ module DerivativeOperations
     const NUM_COILS = 1
 
     include("types.jl")
-    include("simulate_derivatives.jl")
+    # This module no longer computes derivatives itself. Its former
+    # simulate_derivatives.jl (finite-difference Bloch simulations) was
+    # removed when the neural surrogate became the forward model: the
+    # surrogate predicts ∂echos directly, in the same physical units the
+    # finite differences produced, so the Jv/Jᴴv kernels below consume them
+    # unchanged.
 
     include("Jv.jl")
     include("Jhv.jl")
@@ -21,6 +26,6 @@ module DerivativeOperations
     @inline global_id() = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     const THREADS_PER_BLOCK = 64
 
-    export simulate_derivatives, Jv, Jᴴv
+    export Jv, Jᴴv, ∂mˣʸ∂T₁T₂, ∂mˣʸ∂T₁T₂ρˣρʸ
 
 end
