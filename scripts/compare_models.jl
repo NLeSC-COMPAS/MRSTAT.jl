@@ -24,6 +24,16 @@
 #   The solver+objective are composed directly here (the same lines
 #   mrstat_recon runs) so the objective can be wrapped for timing without
 #   touching the package.
+# - Nothing is timed until a throwaway warm-up solve has run with each
+#   model. The first reconstruction of a session pays one-off JIT
+#   compilation for machinery both arms share — Jᴴv in the first mode-2
+#   objective call, Jv in the first CG product — measured here at ~17 s.
+#   That is enough to make whichever arm runs first look 1.5× slower
+#   end-to-end than the other, and to inflate its "time inside the
+#   objective" past the arm whose every individual call is 6× slower. The
+#   cost belongs to the session, not to a forward model (both models hand
+#   the kernels the same concrete types, so the kernels compile once and
+#   whoever goes first is billed), so it is paid before the clock starts.
 #
 # Speed is reported at three levels because they answer different questions:
 #   1. forward model alone      — what the surrogate accelerates (~50×);
@@ -44,6 +54,7 @@ using CUDA
 using StructArrays
 using Statistics
 using Printf
+using Logging: NullLogger, with_logger
 using PythonPlot
 
 const OUTDIR = joinpath(@__DIR__, "output")
@@ -94,7 +105,7 @@ T₂true = Array(phantom.T₂)
 # with a timing wrapper around the objective)
 # ---------------------------------------------------------------------------
 
-function instrumented_recon(model, raw; x0, LB, UB)
+function instrumented_recon(model, raw; x0, LB, UB, options = SolverOptions())
     check_experiment(model, trajectory, transmit_field)
     nvox = length(coordinates)
     x0m = repeat(x0', nvox) |> f32
@@ -112,7 +123,7 @@ function instrumented_recon(model, raw; x0, LB, UB)
     end
 
     wall = @elapsed output = solver(objfun, vec(x0m), vec(LBm), vec(UBm),
-                                    SolverOptions(), (x, t) -> nothing)
+                                    options, (x, t) -> nothing)
     return output, calls, wall
 end
 
@@ -165,6 +176,32 @@ t_fwd_blo = CUDA.@elapsed compute_echos_and_derivatives(bloch, params_true)
 
 x0, LB, UB = default_bounds(surrogate)
 
+# Compile the shared solver machinery before anything is measured (see the
+# header). Two trust-region iterations are plenty: the first alone
+# exercises the mode-2 objective, Jᴴv, Jv (through the first CG product),
+# chooseStep and the mode-0 objective. Both models are warmed, so neither
+# arm carries residual model-specific specialization into its measurement.
+# The solver is chatty and none of this is a result, so its output goes to
+# devnull and its @info/@time chatter to a null logger.
+function warmup!(model, raw)
+    redirect_stdout(devnull) do
+        with_logger(NullLogger()) do
+            instrumented_recon(model, raw; x0, LB, UB,
+                               options = SolverOptions(max_iter_trf = 2))
+        end
+    end
+    return nothing
+end
+
+println("═"^72)
+println("Warm-up: compiling the shared Jv/Jᴴv and solver machinery (untimed)")
+println("═"^72)
+t_warm = @elapsed begin
+    warmup!(surrogate, raw_sur)
+    warmup!(bloch, raw_bloch)
+end
+@printf("  done in %.1f s — compilation only, excluded from every number below.\n", t_warm)
+
 println("═"^72)
 println("Reconstruction A: SurrogateModel (self-consistent data)")
 println("═"^72)
@@ -207,9 +244,25 @@ objtotal(calls) = sum(c.seconds for c in calls)
 @printf("  %-36s %9d/%-3d %8d/%-3d\n", "objective calls (mode 0/mode 2)",
         count_mode(calls_sur, 0), count_mode(calls_sur, 2),
         count_mode(calls_blo, 0), count_mode(calls_blo, 2))
+# Guard against the confound the warm-up exists to remove: with everything
+# compiled, the total time inside the objective is just the per-call
+# medians times the call counts. A total that runs well above that means
+# one call absorbed something which is not forward-model work — leftover
+# compilation, a GC pause — so the two lines are printed together instead
+# of leaving the reader to multiply the rows above and notice the gap.
+medianfit(calls) = sum(count_mode(calls, m) * level2(calls, m) / 1000 for m in (0, 2))
 @printf("  %-36s %10.1f s  %10.1f s\n", "time inside the objective (total)", objtotal(calls_sur), objtotal(calls_blo))
+@printf("  %-36s %10.1f s  %10.1f s\n", "  └ expected: medians × call counts", medianfit(calls_sur), medianfit(calls_blo))
 @printf("  %-36s %10.1f s  %10.1f s\n", "time in solver internals (H·v, CG)", wall_sur - objtotal(calls_sur), wall_blo - objtotal(calls_blo))
 @printf("  %-36s %10.1f s  %10.1f s\n", "end-to-end reconstruction", wall_sur, wall_blo)
+println()
+# What the surrogate actually buys end-to-end, against what any
+# forward-model acceleration could buy. The bound removes the surrogate
+# arm's whole objective time, so it is generous — that time also contains
+# the phase encoding, signal integration and Jᴴv gradient both arms pay.
+@printf("  %-36s %10.2f×\n", "end-to-end speedup (surrogate)", wall_blo / wall_sur)
+@printf("  %-36s %10.2f×\n", "  └ upper bound, free forward model",
+        wall_blo / (wall_sur - objtotal(calls_sur)))
 println()
 println("  Reading the numbers: the surrogate makes the forward model ~",
         round(Int, t_fwd_blo / t_fwd_sur), "× faster, which shows directly in the")
