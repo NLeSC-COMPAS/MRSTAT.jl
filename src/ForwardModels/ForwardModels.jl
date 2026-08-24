@@ -51,6 +51,7 @@ using NeuralBloch: torch, to_torch, from_torch, on_task_stream
 using ..DerivativeOperations: ∂mˣʸ∂T₁T₂
 
 export ForwardModel, BlochModel, SurrogateModel, load_surrogate,
+       neuralbloch_repo,
        compute_echos, compute_echos_and_derivatives, nechos,
        default_bounds, check_experiment
 

@@ -70,7 +70,7 @@ surrogate = load_surrogate()
 # config/data.yaml (frozen for this checkpoint): FISP3D with the repo's RF
 # train, TR 5.58 ms, TE 2.745 ms, max_state 64, TI 10.84 ms, TW 0, five
 # repetitions (sampling the last), inversion prepulse, wait spoiling.
-neuralbloch_dir = joinpath(dirname(pkgdir(MRSTAT)), "NeuralBloch")
+neuralbloch_dir = neuralbloch_repo()
 readvec(p) = [parse(Float64, l) for l in eachline(p) if !isempty(strip(l))]
 flip_deg = readvec(joinpath(neuralbloch_dir, "data", "rf_data", "rf_angle_list.txt"))
 phase_deg = readvec(joinpath(neuralbloch_dir, "data", "rf_data", "rf_phase_list.txt"))

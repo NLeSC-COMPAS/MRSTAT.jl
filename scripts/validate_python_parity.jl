@@ -36,7 +36,7 @@ const NTOL_E2E = 1e-4   # end-to-end relative tolerance (ulp-level input noise)
 
 surrogate = load_surrogate()
 NTR = nechos(surrogate)
-neuralbloch_dir = joinpath(dirname(pkgdir(MRSTAT)), "NeuralBloch")
+neuralbloch_dir = neuralbloch_repo()
 model_pt = joinpath(neuralbloch_dir, "outputs", "model.pt")
 
 println("═"^70)

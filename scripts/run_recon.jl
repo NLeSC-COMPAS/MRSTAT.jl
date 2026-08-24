@@ -87,7 +87,7 @@ res_self = reconstruct_and_report(raw_data, "surrogate data")
 
 # --- (b) EPG-simulated raw data ---------------------------------------------
 # The training sequence (frozen for this checkpoint; see validate_contract.jl).
-neuralbloch_dir = joinpath(dirname(pkgdir(MRSTAT)), "NeuralBloch")
+neuralbloch_dir = neuralbloch_repo()
 readvec(p) = [parse(Float64, l) for l in eachline(p) if !isempty(strip(l))]
 flip_deg = readvec(joinpath(neuralbloch_dir, "data", "rf_data", "rf_angle_list.txt"))
 phase_deg = readvec(joinpath(neuralbloch_dir, "data", "rf_data", "rf_phase_list.txt"))

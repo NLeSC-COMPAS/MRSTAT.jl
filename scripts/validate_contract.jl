@@ -85,7 +85,7 @@ println("Part 2: surrogate vs BlochSimulators FISP3D ground truth")
 println("═"^70)
 
 surrogate = load_surrogate()
-neuralbloch_dir = joinpath(dirname(pkgdir(MRSTAT)), "NeuralBloch")
+neuralbloch_dir = neuralbloch_repo()
 
 # The training sequence, reproduced from NeuralBloch's data_generation.jl +
 # config/data.yaml (frozen for this checkpoint): FISP3D with the repo's RF

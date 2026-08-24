@@ -84,7 +84,29 @@ function _num_layers(keys::Vector{String}, subnet::String)
 end
 
 """
-    load_surrogate(; model_path, neuralbloch_dir) -> SurrogateModel
+    neuralbloch_repo() -> String
+
+Path to the sibling NeuralBloch python repository — the model code, the
+trained checkpoint and the RF tables all live there.
+
+Defaults to `../NeuralBloch` next to this package, which is how the
+repositories are meant to be checked out. Set the `NEURALBLOCH_DIR`
+environment variable to point elsewhere: `pkgdir` resolves to the *worktree*
+root, so a git worktree created outside the shared parent directory is the
+usual reason the default misses.
+"""
+function neuralbloch_repo()
+    dir = get(ENV, "NEURALBLOCH_DIR",
+              joinpath(dirname(pkgdir(@__MODULE__)), "NeuralBloch"))
+    isdir(dir) || error(
+        "NeuralBloch repository not found at $dir; it is expected as a " *
+        "sibling checkout of this package. Set the NEURALBLOCH_DIR " *
+        "environment variable to its path.")
+    return dir
+end
+
+"""
+    load_surrogate(; neuralbloch_dir, model_path) -> SurrogateModel
 
 Load the trained surrogate for use as a reconstruction forward model.
 
@@ -106,12 +128,14 @@ Load the trained surrogate for use as a reconstruction forward model.
 
 This is the only place torch is imported — loading MRSTAT alone never
 touches Python beyond what PythonPlot already does. Paths default to the
-sibling-repository layout (`../NeuralBloch` next to this package); pass
-`model_path`/`neuralbloch_dir` to override.
+sibling-repository layout resolved by [`neuralbloch_repo`](@ref)
+(`../NeuralBloch` next to this package, or `NEURALBLOCH_DIR`); the
+checkpoint follows `neuralbloch_dir`, so overriding that relocates both.
+Pass `model_path`/`neuralbloch_dir` to override either directly.
 """
 function load_surrogate(;
-    model_path::AbstractString = joinpath(dirname(pkgdir(@__MODULE__)), "NeuralBloch", "outputs", "model.pt"),
-    neuralbloch_dir::AbstractString = joinpath(dirname(pkgdir(@__MODULE__)), "NeuralBloch"),
+    neuralbloch_dir::AbstractString = neuralbloch_repo(),
+    model_path::AbstractString = joinpath(neuralbloch_dir, "outputs", "model.pt"),
 )
     isfile(model_path) || error(
         "Surrogate checkpoint not found at $model_path — pass `model_path`.")
