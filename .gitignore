@@ -3,3 +3,4 @@
 .git
 # Manifest.toml
 scripts/output/
+.venv

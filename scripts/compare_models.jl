@@ -3,7 +3,7 @@
 # simulator.
 #
 # Run with:
-#   source ../NeuralBloch.jl/env.sh        # binds PythonCall to the torch venv
+#   source env.sh                          # binds PythonCall to the torch venv
 #   julia --project=. scripts/compare_models.jl
 #
 # Design:

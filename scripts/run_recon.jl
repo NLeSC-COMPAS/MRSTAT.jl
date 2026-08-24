@@ -1,7 +1,7 @@
 # End-to-end MR-STAT reconstruction on the neural surrogate forward model.
 #
 # Run with:
-#   source ../NeuralBloch.jl/env.sh        # binds PythonCall to the torch venv
+#   source env.sh                          # binds PythonCall to the torch venv
 #   julia --project=. scripts/run_recon.jl
 #
 # Two experiments on the same 120×120 phantom, both reconstructed with the

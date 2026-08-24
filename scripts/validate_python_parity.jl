@@ -1,7 +1,7 @@
 # Parity validation: the Julia surrogate wrapper vs pure-python execution.
 #
 # Run with:
-#   source ../NeuralBloch.jl/env.sh        # binds PythonCall to the torch venv
+#   source env.sh                          # binds PythonCall to the torch venv
 #   julia --project=. scripts/validate_python_parity.jl
 #
 # The reference path is the NeuralBloch repository's own way of running the

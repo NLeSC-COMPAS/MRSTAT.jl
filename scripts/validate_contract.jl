@@ -1,7 +1,7 @@
 # Contract validation for the neural surrogate forward model.
 #
 # Run with (matplotlib-free, terminal only):
-#   source ../NeuralBloch.jl/env.sh        # binds PythonCall to the torch venv
+#   source env.sh                          # binds PythonCall to the torch venv
 #   julia --project=. scripts/validate_contract.jl
 #
 # Two parts:
