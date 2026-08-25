@@ -1,6 +1,6 @@
 .vscode
 .CondaPkg
 .git
-# Manifest.toml
+Manifest.toml
 scripts/output/
 .venv

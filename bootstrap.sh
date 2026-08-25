@@ -4,7 +4,7 @@
 #   ./bootstrap.sh          set up, then report what is still missing
 #   source env.sh           before every Julia session afterwards
 #
-# What it does NOT do: write anything outside this repository. The three
+# What it does NOT do: write anything outside this repository. The two
 # sibling checkouts and the trained checkpoint are other people's
 # directories, so they are detected and reported, never created or modified.
 set -euo pipefail
@@ -68,17 +68,19 @@ print(f"    torch {torch.__version__}, CUDA available: {torch.cuda.is_available(
 PYEOF
 
 # ---------------------------------------------------------------------------
-hdr "4. Sibling checkouts (Julia path dependencies)"
+hdr "4. Sibling checkout (the one Julia path dependency)"
 # ---------------------------------------------------------------------------
-# Both are `Pkg.develop` path deps in the tracked Manifest, which records
-# absolute paths from wherever it was last resolved — i.e. someone else's
-# home directory on a fresh clone. Re-pointing them below fixes that.
-for pair in "BlochSimulators.jl|https://github.com/MagneticResonanceImaging/BlochSimulators.jl.git" \
-            "NeuralBloch.jl|(local only — no remote; obtain from the author)"; do
-    d="${pair%%|*}"; src="${pair##*|}"
-    if [ -d "../$d" ]; then pass "../$d"
-    else fail "../$d missing — $src"; fi
-done
+# NeuralBloch.jl is not in the General registry, so it is a `Pkg.develop`
+# path dep. Manifest.toml is not tracked, so a fresh clone has none and
+# cannot resolve NeuralBloch at all until step 6 points the dep at this
+# checkout. Every other dependency, BlochSimulators included, comes from
+# the registry and needs nothing here.
+if [ -d ../NeuralBloch.jl ]; then
+    pass "../NeuralBloch.jl"
+else
+    fail "../NeuralBloch.jl missing — git clone"
+    say  "    https://github.com/NLeSC-COMPAS/NeuralBloch.jl.git beside this repo."
+fi
 
 # ---------------------------------------------------------------------------
 hdr "5. NeuralBloch python repository (model code, RF tables, checkpoint)"
@@ -105,19 +107,18 @@ fi
 # ---------------------------------------------------------------------------
 hdr "6. Julia environment"
 # ---------------------------------------------------------------------------
-if [ -d ../BlochSimulators.jl ] && [ -d ../NeuralBloch.jl ]; then
+if [ -d ../NeuralBloch.jl ]; then
     export JULIA_CONDAPKG_BACKEND=Null JULIA_PYTHONCALL_EXE="$PY"
     julia --project=. -e '
         using Pkg
-        # Point the two path deps at THIS machine before instantiating.
-        Pkg.develop([PackageSpec(path = abspath("../BlochSimulators.jl")),
-                     PackageSpec(path = abspath("../NeuralBloch.jl"))])
+        # Point the path dep at THIS machine, then resolve from scratch.
+        Pkg.develop(PackageSpec(path = abspath("../NeuralBloch.jl")))
         Pkg.instantiate(); Pkg.precompile()' >/tmp/mrstat-bootstrap.$$ 2>&1 \
-        && pass "path deps re-pointed, project instantiated and precompiled" \
+        && pass "path dep set, project instantiated and precompiled" \
         || { fail "Julia setup failed:"; sed 's/^/    /' /tmp/mrstat-bootstrap.$$; }
     rm -f /tmp/mrstat-bootstrap.$$
 else
-    fail "skipped — sibling Julia checkouts missing (see 4)"
+    fail "skipped — ../NeuralBloch.jl missing (see 4)"
 fi
 
 # ---------------------------------------------------------------------------

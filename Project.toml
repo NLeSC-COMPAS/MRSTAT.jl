@@ -22,9 +22,9 @@ StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
 TickTock = "9ff05d80-102d-5586-aa04-3a8bd1a90d20"
 
 [compat]
-# BlochSimulators 0.9 is the local checkout: the version whose signal-path
-# k-space convention the Jv/Jhv kernels are aligned with, and the version
-# the surrogate's training data was generated with.
+# BlochSimulators 0.9 comes from the General registry: the version whose
+# signal-path k-space convention the Jv/Jhv kernels are aligned with, and
+# the version the surrogate's training data was generated with.
 BlochSimulators = "0.9"
 CUDA = "5.4, 6"
 ComputationalResources = "0.3"
@@ -33,7 +33,7 @@ InteractiveUtils = "1"
 LinearAlgebra = "1"
 LinearMaps = "3"
 Memento = "1"
-NeuralBloch = "0.3"
+NeuralBloch = "0.3, 0.4"
 PythonCall = "0.9"
 PythonPlot = "1"
 QMRIColors = "1"
