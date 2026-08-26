@@ -17,6 +17,9 @@
 #      profile-valid batch size. Same 15% NMAE gate and same rationale as
 #      validate_contract.jl: a convention bug (layout, units, complex
 #      pairing) misses by ~100%, true approximation error by a few percent.
+#      The RF tables come from models/rf_data/ (falling back to a NeuralBloch
+#      checkout); with neither, this part is skipped and reported — the
+#      TensorRT model itself never needs the tables.
 #
 #   3. Parity against the PyTorch surrogate — the same trained weights, so
 #      the two paths must agree to FP32 kernel-reordering levels: the 0.1%
@@ -71,25 +74,11 @@ let api = m.api, h = m.h
 end
 
 # ---------------------------------------------------------------------------
-println("═"^70)
-println("Part 2: TensorRT vs BlochSimulators FISP3D ground truth")
-println("═"^70)
-
-# The training sequence, reproduced from NeuralBloch's data_generation.jl +
-# config/data.yaml exactly as validate_contract.jl does for the surrogate.
-neuralbloch_dir = neuralbloch_repo()
-readvec(p) = [parse(Float64, l) for l in eachline(p) if !isempty(strip(l))]
-flip_deg = readvec(joinpath(neuralbloch_dir, "data", "rf_data", "rf_angle_list.txt"))
-phase_deg = readvec(joinpath(neuralbloch_dir, "data", "rf_data", "rf_phase_list.txt"))
-rf_train = flip_deg .* exp.(1im .* deg2rad.(phase_deg))
-@assert length(rf_train) == nechos(m)
-sequence = gpu(f32(FISP3D(rf_train, 0.00558, 0.002745, 64, 0.01084, 0.000, 5, true, true, 1, 0.0)))
-
-# The engine only serves profile-sized batches, so the evaluation set is
-# OPT-many random points inside the trained box (T₁ ∈ [0.1,5], T₂ ∈ [0.01,2]
-# log-uniform with the physical T₂ < T₁ constraint, B₁ ∈ [0.8,1.2]) — a
-# denser probe of the box than a small grid, at the batch size the engine is
-# tuned for.
+# The evaluation set shared by parts 2–4, plus the TensorRT predictions for
+# it. The engine only serves profile-sized batches, so it is OPT-many random
+# points inside the trained box (T₁ ∈ [0.1,5], T₂ ∈ [0.01,2] log-uniform with
+# the physical T₂ < T₁ constraint, B₁ ∈ [0.8,1.2]) — a denser probe of the
+# box than a small grid, at the batch size the engine is tuned for.
 Random.seed!(20260826)
 n = m.optB
 T₁ = exp.(rand(n) .* (log(5.0) - log(0.1)) .+ log(0.1))
@@ -97,33 +86,63 @@ T₂ = min.(exp.(rand(n) .* (log(2.0) - log(0.01)) .+ log(0.01)), 0.8 .* T₁)
 B₁ = 0.8 .+ 0.4 .* rand(n)
 parameters = map(T₁T₂B₁ρˣρʸ, T₁, T₂, B₁, ones(n), zeros(n)) |> StructArray
 parameters = gpu(f32(parameters))
-println("  evaluation points: $n random in-box (seeded), T₂ < T₁ enforced")
-
-echos_ref = simulate_magnetization(CUDALibs(), sequence, parameters)
-∂ref = simulate_derivatives_finite_difference((:T₁, :T₂), echos_ref, sequence, parameters)
 
 echos_trt, ∂echos_trt = compute_echos_and_derivatives(m, parameters)
-@assert size(echos_trt) == size(echos_ref) == (nechos(m), n)
-
+@assert size(echos_trt) == (nechos(m), n)
 # compute_echos runs the same engine on the same input — bitwise agreement
-# with the full forward documents that mode 0 and mode 2 cannot diverge.
+# with the full forward means mode 0 and mode 2 cannot diverge.
 @assert Array(compute_echos(m, parameters)) == Array(echos_trt)
-println("  ✓ compute_echos bitwise-matches the full forward")
 
-e_sig = nmae(Array(echos_trt), Array(echos_ref))
-e_dt1 = nmae(Array(∂echos_trt.∂T₁), Array(∂ref.T₁))
-e_dt2 = nmae(Array(∂echos_trt.∂T₂), Array(∂ref.T₂))
+# ---------------------------------------------------------------------------
+println("═"^70)
+println("Part 2: TensorRT vs BlochSimulators FISP3D ground truth")
+println("═"^70)
 
-println()
-println("  NMAE vs FISP3D ground truth (convention bugs ≈ 100%):")
-println("    signal : $(round(100 * e_sig, digits = 2)) %")
-println("    ∂/∂T₁  : $(round(100 * e_dt1, digits = 2)) %")
-println("    ∂/∂T₂  : $(round(100 * e_dt2, digits = 2)) %")
+# The training sequence is rebuilt from the RF tables — in-repo copies first
+# (models/rf_data/, populated by bootstrap.sh), then a NeuralBloch checkout.
+rf_dir = let d = joinpath(models_dir(), "rf_data")
+    if isfile(joinpath(d, "rf_angle_list.txt"))
+        d
+    else
+        nb = try
+            joinpath(neuralbloch_repo(), "data", "rf_data")
+        catch
+            ""
+        end
+        !isempty(nb) && isfile(joinpath(nb, "rf_angle_list.txt")) ? nb : ""
+    end
+end
+if isempty(rf_dir)
+    println("  skipped — no RF tables found (populate models/rf_data/, see models/README.md)")
+else
+    readvec(p) = [parse(Float64, l) for l in eachline(p) if !isempty(strip(l))]
+    flip_deg = readvec(joinpath(rf_dir, "rf_angle_list.txt"))
+    phase_deg = readvec(joinpath(rf_dir, "rf_phase_list.txt"))
+    rf_train = flip_deg .* exp.(1im .* deg2rad.(phase_deg))
+    @assert length(rf_train) == nechos(m)
+    sequence = gpu(f32(FISP3D(rf_train, 0.00558, 0.002745, 64, 0.01084, 0.000, 5, true, true, 1, 0.0)))
+    println("  evaluation points: $n random in-box (seeded), T₂ < T₁ enforced")
+    println("  RF tables: $rf_dir")
 
-@assert e_sig < 0.15 && e_dt1 < 0.15 && e_dt2 < 0.15 """
-    TensorRT model disagrees with ground truth beyond model-accuracy levels —
-    this indicates a convention error (layout/units/orientation), not
-    approximation error."""
+    echos_ref = simulate_magnetization(CUDALibs(), sequence, parameters)
+    ∂ref = simulate_derivatives_finite_difference((:T₁, :T₂), echos_ref, sequence, parameters)
+    @assert size(echos_ref) == size(echos_trt)
+
+    e_sig = nmae(Array(echos_trt), Array(echos_ref))
+    e_dt1 = nmae(Array(∂echos_trt.∂T₁), Array(∂ref.T₁))
+    e_dt2 = nmae(Array(∂echos_trt.∂T₂), Array(∂ref.T₂))
+
+    println()
+    println("  NMAE vs FISP3D ground truth (convention bugs ≈ 100%):")
+    println("    signal : $(round(100 * e_sig, digits = 2)) %")
+    println("    ∂/∂T₁  : $(round(100 * e_dt1, digits = 2)) %")
+    println("    ∂/∂T₂  : $(round(100 * e_dt2, digits = 2)) %")
+
+    @assert e_sig < 0.15 && e_dt1 < 0.15 && e_dt2 < 0.15 """
+        TensorRT model disagrees with ground truth beyond model-accuracy levels —
+        this indicates a convention error (layout/units/orientation), not
+        approximation error."""
+end
 
 # ---------------------------------------------------------------------------
 println("═"^70)

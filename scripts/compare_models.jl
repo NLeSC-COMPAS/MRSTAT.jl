@@ -98,14 +98,14 @@ bloch = BlochModel(sequence)
 # absent — every tensorrt block below is guarded on that.
 tensorrt = let
     shim = joinpath(dirname(@__DIR__), "deps", "tensorrt", "libtrtjl.so")
-    engine = joinpath(neuralbloch_dir, "outputs", "model.engine")
+    engine = joinpath(models_dir(), "model.engine")
     if isfile(shim) && isfile(engine)
         m = load_tensorrt_model()
         @assert nechos(m) == nechos(surrogate)
         m
     else
         missing_bits = join(vcat(isfile(shim) ? String[] : ["the shim (run deps/tensorrt/build_shim.sh)"],
-                                 isfile(engine) ? String[] : ["the engine (build in ../NeuralBloch)"]), " and ")
+                                 isfile(engine) ? String[] : ["the engine (populate models/ — see models/README.md)"]), " and ")
         println("note: TensorRT arm skipped — missing $missing_bits")
         nothing
     end
