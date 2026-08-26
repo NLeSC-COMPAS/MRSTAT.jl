@@ -10,9 +10,9 @@ using Libdl
 shim = joinpath(@__DIR__, "libtrtjl.so")
 isfile(shim) || error("shim not built — run deps/tensorrt/build_shim.sh first")
 engine = isempty(ARGS) ?
-    normpath(joinpath(@__DIR__, "..", "..", "..", "NeuralBloch", "outputs", "model.engine")) :
+    normpath(joinpath(@__DIR__, "..", "..", "models", "model.engine")) :
     ARGS[1]
-isfile(engine) || error("engine not found at $engine")
+isfile(engine) || error("engine not found at $engine — populate models/ (./bootstrap.sh) or pass a path")
 
 lib = dlopen(shim)
 sym(s) = dlsym(lib, s)

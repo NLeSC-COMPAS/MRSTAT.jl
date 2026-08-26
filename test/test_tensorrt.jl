@@ -18,17 +18,13 @@ using BlochSimulators
 using MRSTAT.DerivativeOperations: ∂mˣʸ∂T₁T₂
 
 _trt_shim = joinpath(pkgdir(MRSTAT), "deps", "tensorrt", "libtrtjl.so")
-_trt_engine = try
-    joinpath(neuralbloch_repo(), "outputs", "model.engine")
-catch err
-    ""
-end
+_trt_engine = joinpath(models_dir(), "model.engine")
 
 if !(isfile(_trt_shim) && isfile(_trt_engine))
     @testset "TensorRTModel" begin
         @info """TensorRT tests skipped — artifacts missing:
             shim   $_trt_shim $(isfile(_trt_shim) ? "(found)" : "(build with deps/tensorrt/build_shim.sh)")
-            engine $(isempty(_trt_engine) ? "<NeuralBloch repo not found>" : _trt_engine) (build in the NeuralBloch repo)"""
+            engine $_trt_engine $(isfile(_trt_engine) ? "(found)" : "(populate models/ — see models/README.md)")"""
         @test_skip false
     end
 else

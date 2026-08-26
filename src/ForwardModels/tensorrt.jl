@@ -157,9 +157,10 @@ end
 
 Load the prebuilt TensorRT engine as a reconstruction forward model.
 
-- `engine_path` defaults to `outputs/model.engine` in the sibling NeuralBloch
-  repository (resolved by [`neuralbloch_repo`](@ref), so `NEURALBLOCH_DIR`
-  relocates it); the engine is built there, never here.
+- `engine_path` defaults to `model.engine` in the in-repo artifacts directory
+  (resolved by [`models_dir`](@ref), so `MRSTAT_MODELS_DIR` relocates it);
+  `bootstrap.sh` copies the file in from a NeuralBloch checkout when one is
+  present. Engines are built there, never here.
 - `shim_path` defaults to the in-repo shim `deps/tensorrt/libtrtjl.so`;
   build it once with `deps/tensorrt/build_shim.sh`.
 - `device` selects the GPU (default: the current CUDA device).
@@ -178,18 +179,20 @@ Everything TensorRT does runs in the same CUDA (primary) context CUDA.jl
 uses, which is what makes raw `CuArray` pointers directly bindable.
 """
 function load_tensorrt_model(;
-    engine_path::AbstractString = joinpath(neuralbloch_repo(), "outputs", "model.engine"),
+    engine_path::AbstractString = joinpath(models_dir(), "model.engine"),
     shim_path::AbstractString = joinpath(pkgdir(@__MODULE__), "deps", "tensorrt", "libtrtjl.so"),
     device = nothing,
     use_graph::Bool = true,
 )
     isfile(shim_path) || error(
         "TensorRT shim not built at $shim_path — run deps/tensorrt/build_shim.sh " *
-        "once (it fetches the TensorRT headers and compiles the C wrapper).")
+        "once (it compiles the C wrapper against the system TensorRT install).")
     isfile(engine_path) || error(
-        "TensorRT engine not found at $engine_path — build it in the NeuralBloch " *
-        "repository (uv run run.py export_onnx && uv run run.py build_engine), " *
-        "or pass `engine_path`.")
+        "TensorRT engine not found at $engine_path — put one there: run " *
+        "./bootstrap.sh next to a NeuralBloch checkout (it copies " *
+        "outputs/model.engine in, building it upstream with `uv run run.py " *
+        "export_onnx && uv run run.py build_engine` if needed), or copy the " *
+        "file in yourself; `engine_path`/MRSTAT_MODELS_DIR override the location.")
 
     CUDA.functional() || error(
         "the TensorRT forward model needs a working CUDA GPU")
@@ -215,7 +218,9 @@ function load_tensorrt_model(;
         h = ccall(api.open, Ptr{Cvoid}, (Cstring,), engine_path)
     end
     h == C_NULL && error(
-        "loading the TensorRT engine failed: " * _lasterr(api, C_NULL))
+        "loading the TensorRT engine failed: " * _lasterr(api, C_NULL) *
+        " — if the engine was rebuilt against a different TensorRT version, " *
+        "install the matching system TensorRT and re-run deps/tensorrt/build_shim.sh.")
 
     empty() = CUDA.CuMatrix{Float32}(undef, 0, 0)
     m = TensorRTModel(h, api, 0, 0, 0, 0, 0,

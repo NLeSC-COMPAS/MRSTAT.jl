@@ -127,18 +127,21 @@ Load the trained surrogate for use as a reconstruction forward model.
 - Moves the model to the GPU in eval mode.
 
 This is the only place torch is imported — loading MRSTAT alone never
-touches Python beyond what PythonPlot already does. Paths default to the
-sibling-repository layout resolved by [`neuralbloch_repo`](@ref)
+touches Python beyond what PythonPlot already does. The model *code* comes
+from the sibling repository resolved by [`neuralbloch_repo`](@ref)
 (`../NeuralBloch` next to this package, or `NEURALBLOCH_DIR`); the
-checkpoint follows `neuralbloch_dir`, so overriding that relocates both.
+*checkpoint* comes from the in-repo artifacts directory resolved by
+[`models_dir`](@ref) (`models/model.pt`, populated by `bootstrap.sh`).
 Pass `model_path`/`neuralbloch_dir` to override either directly.
 """
 function load_surrogate(;
     neuralbloch_dir::AbstractString = neuralbloch_repo(),
-    model_path::AbstractString = joinpath(neuralbloch_dir, "outputs", "model.pt"),
+    model_path::AbstractString = joinpath(models_dir(), "model.pt"),
 )
     isfile(model_path) || error(
-        "Surrogate checkpoint not found at $model_path — pass `model_path`.")
+        "Surrogate checkpoint not found at $model_path — run ./bootstrap.sh " *
+        "next to a NeuralBloch checkout (it copies outputs/model.pt in), copy " *
+        "the file in yourself, or pass `model_path`.")
     isfile(joinpath(neuralbloch_dir, "src", "model.py")) || error(
         "NeuralBloch python repo not found at $neuralbloch_dir " *
         "(no src/model.py) — pass `neuralbloch_dir`.")
