@@ -26,6 +26,7 @@ using .ForwardModels
 # entry points. (load_surrogate is exported by ForwardModels once the
 # surrogate implementation is included there.)
 export ForwardModel, BlochModel, SurrogateModel, load_surrogate,
+       TensorRTModel, load_tensorrt_model,
        neuralbloch_repo,
        compute_echos, compute_echos_and_derivatives, nechos,
        default_bounds, check_experiment,

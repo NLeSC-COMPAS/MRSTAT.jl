@@ -15,6 +15,9 @@ This module defines that two-function interface and its implementations:
 - `SurrogateModel` (see `surrogate.jl`) — the learned route: a trained
   neural network predicts echos and derivatives directly, with zero-copy
   data exchange between Julia and PyTorch.
+- `TensorRTModel` (see `tensorrt.jl`) — the compiled route: the same
+  trained network, run through its prebuilt TensorRT engine via a C shim
+  and `ccall` — no Python anywhere in the path.
 
 # The interface
 
@@ -51,6 +54,7 @@ using NeuralBloch: torch, to_torch, from_torch, on_task_stream
 using ..DerivativeOperations: ∂mˣʸ∂T₁T₂
 
 export ForwardModel, BlochModel, SurrogateModel, load_surrogate,
+       TensorRTModel, load_tensorrt_model,
        neuralbloch_repo,
        compute_echos, compute_echos_and_derivatives, nechos,
        default_bounds, check_experiment
@@ -146,5 +150,8 @@ end
 
 # The learned forward model (SurrogateModel + load_surrogate).
 include("surrogate.jl")
+
+# The compiled forward model (TensorRTModel + load_tensorrt_model).
+include("tensorrt.jl")
 
 end # module ForwardModels
