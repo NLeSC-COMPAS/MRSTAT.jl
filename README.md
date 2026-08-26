@@ -5,7 +5,7 @@ This repository contains an implementation of the partially-matrix free, inexact
 **The forward model is pluggable.** The reconstruction talks to an abstract `ForwardModel` through two functions — `compute_echos` (echo trains) and `compute_echos_and_derivatives` (echo trains plus physical-unit ∂/∂T₁, ∂/∂T₂). Three implementations ship with the package:
 
 - **`BlochModel`** — the physical route: EPG/Bloch simulation of any [BlochSimulators.jl](https://github.com/MagneticResonanceImaging/BlochSimulators.jl) pulse sequence, with derivatives by finite differences. Self-contained; works for any sequence and geometry.
-- **`SurrogateModel`** — the learned route: the trained PyTorch surrogate from [NeuralBloch](https://github.com/NLeSC-COMPAS/NeuralBloch) predicts echos *and* derivatives in a single network forward. Julia arrays and torch tensors cross the language boundary **zero-copy** in both directions through [NeuralBloch.jl](https://github.com/NLeSC-COMPAS/NeuralBloch.jl), on one CUDA stream with no synchronization fences. Both the sequence (FISP3D, 600 readouts, TR 5.58 ms, TE 2.745 ms, TI 10.84 ms) and the trained box (T₁ ∈ [0.1, 5] s, T₂ ∈ [0.01, 2] s, B₁ ∈ [0.8, 1.2]) are baked into the checkpoint; `check_experiment` and `default_bounds` hold experiments to both.
+- **`SurrogateModel`** — the learned route: the trained PyTorch surrogate from [NeuralBloch](https://github.com/NLeSC-COMPAS/NeuralBloch) predicts echos *and* derivatives in a single network forward. Julia arrays and torch tensors cross the language boundary **zero-copy** in both directions through [NeuralBloch.jl](https://github.com/NLeSC-COMPAS/NeuralBloch.jl), on one CUDA stream with no synchronization fences. NeuralBloch.jl is a *weak* dependency: the surrogate's implementation lives in a package extension that activates on `using NeuralBloch`, so the other two models never load or need it. Both the sequence (FISP3D, 600 readouts, TR 5.58 ms, TE 2.745 ms, TI 10.84 ms) and the trained box (T₁ ∈ [0.1, 5] s, T₂ ∈ [0.01, 2] s, B₁ ∈ [0.8, 1.2]) are baked into the checkpoint; `check_experiment` and `default_bounds` hold experiments to both.
 - **`TensorRTModel`** — the compiled route: the *same* trained network, run through its prebuilt TensorRT engine with **no Python anywhere in the path**. Julia `ccall`s into a small C shim over the TensorRT C++ runtime (`deps/tensorrt/`, compiled once per machine against the **system TensorRT installation** — NVIDIA's Debian/RPM packages, a prerequisite this repository checks and hints at but never installs); the `(3, N)` input staging buffer is bound to the engine by raw device pointer (byte-identical to the engine's row-major `(N, 3)` tensor, zero-copy), and the whole invocation is captured once per batch size as a CUDA graph, so each inference submits from the host in ~5 µs. At 14,400 voxels the engine runs in 1.3 ms and the full forward call in 2.3 ms (against the PyTorch surrogate's 2.8 ms; the difference between the two TensorRT numbers is the one unavoidable copy — the engine's outputs store re/im as concatenated halves, a layout frozen at export, so each consumed output costs one combine broadcast). The engine lives in-repo at `models/model.engine`, and its echo count and admissible batch range are read from the engine itself — the example engine serves 10,000–40,000 voxels, tuned for 14,400 — with batches outside the range failing loudly; engines are built in NeuralBloch, never here.
 
 Everything downstream of the forward model — phase encoding, signal integration, the partially matrix-free `Jv`/`Jᴴv` Jacobian products, the trust-region solver — is shared. The surrogate produces echos + derivatives ~40–46× faster than EPG simulation + finite differences (3.1–3.5 ms against ~143 ms at 14,400 voxels), but a reconstruction spends far more time in the shared Gauss-Newton products than in the forward model, so the end-to-end gain is Amdahl-limited to ~1.2×. [`scripts/compare_models.jl`](#scripts) measures all three levels.
@@ -18,36 +18,53 @@ source env.sh                  # every session, before starting Julia
 deps/tensorrt/build_shim.sh    # once, optional — compiles the TensorRT shim against the system TensorRT
 ```
 
-`bootstrap.sh` is idempotent and writes nothing outside this repository: it installs `juliaup`/`uv` if they are absent, finds or builds a Python with `torch` and `matplotlib`, copies the model artifacts into `models/` from a NeuralBloch checkout when one is present (warning when a copy drifts from the checkout — see `models/README.md`), re-points the one `Pkg.develop` path dependency (`NeuralBloch.jl`) at your checkout, instantiates the project, and reports the state of the TensorRT prerequisites. Anything it cannot supply it names, with the command to fix it.
+`bootstrap.sh` is idempotent and writes nothing outside this repository: it installs `juliaup`/`uv` if they are absent, finds or builds a Python with `torch` and `matplotlib`, copies the model artifacts into `models/` from a NeuralBloch checkout when one is present (warning when a copy drifts from the checkout — see `models/README.md`), resolves and precompiles the Julia project (every dependency comes from the General registry — no sibling is needed to instantiate), and reports the state of the optional per-model pieces. Anything it cannot supply it names, with the command to fix it.
 
-`env.sh` sets the two variables PythonCall needs — `JULIA_CONDAPKG_BACKEND=Null` and `JULIA_PYTHONCALL_EXE` — choosing the first interpreter that can `import torch` from `$JULIA_PYTHONCALL_EXE`, `$MRSTAT_PYTHON`, `./.venv`, `../NeuralBloch.jl/.venv`, then `python3`.
+`env.sh` does two things per session: it sets the two variables PythonCall needs — `JULIA_CONDAPKG_BACKEND=Null` and `JULIA_PYTHONCALL_EXE`, choosing the first interpreter that can `import torch` from `$JULIA_PYTHONCALL_EXE`, `$MRSTAT_PYTHON`, `./.venv`, `../NeuralBloch.jl/.venv`, then `python3` — and it puts a `../NeuralBloch.jl` checkout on the Julia load path when one exists, so `using NeuralBloch` can activate the surrogate's package extension.
 
 **Do not skip it — the failure is silent and slow.** Without `JULIA_CONDAPKG_BACKEND=Null`, loading `PythonPlot` makes CondaPkg download a 1.3 GB conda environment into `.CondaPkg/` and bind PythonCall to *that* interpreter. Nothing errors: CondaPkg installs only what the Julia packages declare, which covers matplotlib but never torch, so the first sign of trouble is `load_surrogate()` failing several minutes later. Only one interpreter carrying **both** works, and `bootstrap.sh` enforces exactly that.
 
-### What a bare clone does not include
+### System prerequisites
 
-| | Needed for | Where it comes from |
+Installed on the machine, outside anything this repository manages. `bootstrap.sh` and `deps/tensorrt/build_shim.sh` check them and print these hints — they never install system packages.
+
+| prerequisite | needed by | install |
 |---|---|---|
-| NVIDIA GPU + CUDA driver + toolkit | everything | the package is CUDA-only; the tests hard-fail without one |
-| system TensorRT (runtime + headers) | the TensorRT model | **a machine prerequisite, like the driver** — NVIDIA's Debian/RPM packages, version matching the engine: `sudo apt-get install libnvinfer11 libnvinfer-headers-dev libnvinfer-dev` ([install guide](https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/installing.html)). `bootstrap.sh` and `build_shim.sh` check and hint, never install |
-| `../NeuralBloch.jl` (0.3–0.4) | everything | not in the General registry: `git clone https://github.com/NLeSC-COMPAS/NeuralBloch.jl.git` |
-| `../NeuralBloch` | the surrogate's python model code; the source `bootstrap.sh` copies artifacts from | `git clone https://github.com/NLeSC-COMPAS/NeuralBloch.git` |
-| `models/model.pt` (in-repo, gitignored) | the surrogate | auto-copied by `bootstrap.sh` from `../NeuralBloch/outputs/` (train it there), or copy one in — see `models/README.md` |
-| `models/model.engine` (in-repo, gitignored) | the TensorRT model | auto-copied likewise (`uv run run.py export_onnx && uv run run.py build_engine` upstream); an engine is specific to the GPU architecture and exact TensorRT version that built it |
-| `models/rf_data/*.txt` (in-repo, gitignored) | the validation scripts' ground-truth arm | auto-copied from `../NeuralBloch/data/rf_data/` |
-| Python with CUDA `torch` **and** `matplotlib` | everything | `bootstrap.sh` builds `./.venv` if no interpreter has both; `using MRSTAT` loads PythonPlot, which imports matplotlib at init |
+| NVIDIA GPU + driver | every forward model | your distro's driver packages or [NVIDIA's](https://www.nvidia.com/drivers/); verify with `nvidia-smi`. The Julia side needs no system CUDA toolkit — CUDA.jl ships its own runtime |
+| TensorRT runtime + headers | the TensorRT model only | NVIDIA's Debian/RPM packages, **version matching `models/model.engine`** (engines are version-locked): `sudo apt-get install libnvinfer11 libnvinfer-headers-dev libnvinfer-dev` (RPM: `…-devel`) — [install guide](https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/installing.html) |
+| CUDA toolkit + g++ | the TensorRT model only | for the one-time shim compile (`cuda_runtime_api.h` + `libcudart`): `sudo apt-get install cuda-toolkit build-essential` from the same NVIDIA repo; `CUDA_HOME` overrides `/usr/local/cuda` |
 
-Every other dependency — BlochSimulators included — comes from the General registry, so `Pkg.instantiate()` fetches it. `NeuralBloch.jl` is the one exception, and since `ForwardModels` imports it at load time the checkout must be there even for a pure `BlochModel` run. The *python* pieces are the genuinely surrogate-only ones: torch is imported lazily, by `load_surrogate()`, and the model code comes from the `../NeuralBloch` checkout. The TensorRT path is self-contained the other way around: only `load_tensorrt_model()` touches the shim and engine, it runs no Python at all, and at runtime it needs nothing beyond this repository and its system prerequisite — with `models/` populated, the python `NeuralBloch` checkout can be absent entirely and `example_mrstat_recon(:tensorrt)` still runs. Each forward model carries its own dependencies and none of another's.
+Everything else is user-space and automatic: `bootstrap.sh` installs `juliaup`/`uv` when absent, every Julia dependency comes from the General registry (`Pkg.instantiate` on a bare clone succeeds), and the Python-with-matplotlib base is built into `./.venv` when no suitable interpreter exists.
 
-Two escape hatches for non-standard layouts: **`NEURALBLOCH_DIR`** overrides where the python repository is looked for, **`MRSTAT_PYTHON`** overrides the interpreter. The first matters more than it sounds: `pkgdir` resolves to the *worktree* root, so a git worktree created outside the shared parent directory will not find its siblings by default.
+### What each forward model needs
+
+Three independent dependency sets — each model carries its own and none of another's. The **base setup**, shared by all three, is what `using MRSTAT` itself needs: the bare clone with its registry dependencies instantiated, a GPU, and a Python with `matplotlib` (PythonPlot loads it at package import; `bootstrap.sh` + `env.sh` handle it).
+
+**`BlochModel` — the base setup and nothing else.** Physics is simulated in-package by BlochSimulators (a registry dependency) for any sequence and geometry: no sibling checkouts, no trained artifacts, no torch, no TensorRT.
+
+**`SurrogateModel` — base plus the PyTorch pieces:**
+- `../NeuralBloch.jl` checkout (`git clone https://github.com/NLeSC-COMPAS/NeuralBloch.jl.git` beside this repo) — the zero-copy Julia↔torch bridge, a *weak* dependency: `env.sh` puts the checkout on the Julia load path and `using NeuralBloch` activates the surrogate's package extension (`load_surrogate` says exactly this when called without it);
+- `../NeuralBloch` checkout (`git clone https://github.com/NLeSC-COMPAS/NeuralBloch.git`) — the python model *code* (`src/model.py`) the surrogate runs through;
+- a CUDA-enabled `torch` in the Python environment (`bootstrap.sh` installs it when building `./.venv`);
+- `models/model.pt` — the trained checkpoint, auto-copied by `bootstrap.sh` from `../NeuralBloch/outputs/` (train it there); gitignored everywhere.
+
+**`TensorRTModel` — base plus the system TensorRT prerequisites; no Python pieces:**
+- the TensorRT and CUDA-toolkit rows of the table above;
+- `models/model.engine` — the prebuilt engine, auto-copied by `bootstrap.sh` from `../NeuralBloch/outputs/` (built there with `uv run run.py export_onnx && uv run run.py build_engine`); locked to the GPU architecture and exact TensorRT version that built it;
+- `deps/tensorrt/build_shim.sh`, once — compiles the C shim against the system TensorRT (it reads the required version from the engine's header and errors with hints on any mismatch).
+
+At runtime the TensorRT path needs no torch and no sibling checkout: with `models/` populated, `example_mrstat_recon(:tensorrt)` runs from this repository alone. The validation scripts' ground-truth arm additionally reads the RF tables `models/rf_data/*.txt` (auto-copied like the artifacts; see `models/README.md`), and the full test suite exercises all three models, so `Pkg.test` needs the surrogate's pieces too.
+
+Escape hatches for non-standard layouts: **`NEURALBLOCH_DIR`** overrides where the python repository is looked for, **`NEURALBLOCH_JL_DIR`** where the bridge checkout is, **`MRSTAT_PYTHON`** the interpreter, and **`MRSTAT_MODELS_DIR`** the artifacts directory. The directory overrides matter more than they sound: `pkgdir` resolves to the *worktree* root, so a git worktree created outside the shared parent directory will not find its siblings by default.
 
 ## Usage
 
 ```julia
 julia> using MRSTAT               # after `source env.sh`
 julia> output = example_mrstat_recon(:bloch);      # Bloch/EPG forward model
-julia> output = example_mrstat_recon(:surrogate);  # neural surrogate forward model
 julia> output = example_mrstat_recon(:tensorrt);   # the same network as a TensorRT engine
+julia> using NeuralBloch          # surrogate only — activates its package extension
+julia> output = example_mrstat_recon(:surrogate);  # neural surrogate forward model
 ```
 
 The examples generate noiseless synthetic data with the chosen model on the same 120×120 phantom geometry and reconstruct it. To reconstruct with your own setup:
@@ -55,7 +72,7 @@ The examples generate noiseless synthetic data with the chosen model on the same
 ```julia
 model = BlochModel(gpu(f32(sequence)))    # any BlochSimulators sequence
 # or
-model = load_surrogate()                  # the trained network, via PyTorch
+model = load_surrogate()                  # the trained network, via PyTorch (after `using NeuralBloch`)
 # or
 model = load_tensorrt_model()             # the trained network, via its TensorRT engine
 
@@ -63,7 +80,7 @@ raw, coordinates, coils, trajectory, transmit_field, phantom = generate_syntheti
 output = mrstat_recon(raw, model, coordinates, coils, trajectory, transmit_field)
 ```
 
-**Unit tests** (169 tests: the interface, all three models — the TensorRT testsets skip with instructions when the shim or engine is absent — objective gradient consistency, Gauss-Newton operator invariants, Aqua package quality):
+**Unit tests** (169 tests: the interface, all three models — the TensorRT testsets skip with instructions when the shim or engine is absent — objective gradient consistency, Gauss-Newton operator invariants, Aqua package quality). The suite exercises all three models, so it needs the surrogate pieces: the `../NeuralBloch.jl` checkout (the test environment resolves it via `[sources]`), `../NeuralBloch`, and `models/model.pt`:
 
 ```julia
 julia> using Pkg; Pkg.test()      # after `source env.sh`; requires a GPU
@@ -92,7 +109,7 @@ The solver narrates every trust-region iteration, so expect a long scroll of `In
 
 ## Structure
 
-- `src/ForwardModels/` — the `ForwardModel` interface and its three implementations. `surrogate.jl` holds checkpoint loading (through NeuralBloch's own python code), the load-time decoder-row permutation that makes the network's output alias directly as a Julia `ComplexF32` matrix, and zero-copy staging and prediction. `tensorrt.jl` holds the engine loader (contract validation, profile and NTR read from the engine), the pointer-bound buffer management, and the CUDA-graph hot path; its native half — the C shim over the system TensorRT runtime and its build script — lives in `deps/tensorrt/`.
+- `src/ForwardModels/` — the `ForwardModel` interface and its three implementations. `surrogate.jl` holds the surrogate's type, contract methods and input staging; the NeuralBloch.jl-touching half — checkpoint loading (through NeuralBloch's own python code, with the load-time decoder-row permutation that makes the network's output alias directly as a Julia `ComplexF32` matrix) and the zero-copy predictions — lives in the `ext/MRSTATNeuralBlochExt.jl` package extension, activated by `using NeuralBloch`. `tensorrt.jl` holds the engine loader (contract validation, profile and NTR read from the engine), the pointer-bound buffer management, and the CUDA-graph hot path; its native half — the C shim over the system TensorRT runtime and its build script — lives in `deps/tensorrt/`.
 - `models/` — the gitignored runtime artifacts (checkpoint, engine, RF tables), the only place the loaders look; populated by `bootstrap.sh` from a NeuralBloch checkout or by hand. See `models/README.md`.
 - `src/utils/objective.jl` — the objective, used by the solver for the cost, the gradient and the Gauss-Newton approximation to the Hessian. Cost-only evaluations (mode 0) ask the model for echos alone.
 - `src/DerivativeOperations/` — the partially matrix-free Jacobian products, `Jv.jl` and `Jhv.jl`. They consume any model's `∂echos` unchanged (derivatives arrive in physical units; the kernels apply the log-parametrization chain rule themselves) and use the same k-space phase convention as BlochSimulators v0.9's signal path, `exp(-i·k·x)` — cost and gradient must describe one forward model.
