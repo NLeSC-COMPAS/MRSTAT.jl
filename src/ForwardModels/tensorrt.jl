@@ -334,6 +334,23 @@ function _bind!(m::TensorRTModel, N::Int)
 
     m.N = N
     m.graph_ok = false
+    if m.use_graph
+        # Capture the whole engine invocation as a CUDA graph, once per batch
+        # size: the hot path then submits a single cudaGraphLaunch instead of
+        # one kernel launch per engine layer. The shim warms up and
+        # synchronizes on the task stream first (reading the constants written
+        # above), captures on its own private stream, and replay later runs on
+        # whatever stream each call provides. An engine that cannot be
+        # captured keeps the per-call enqueueV3 path — more host overhead,
+        # same results.
+        rc = ccall(m.api.capture, Int32, (Ptr{Cvoid}, Ptr{Cvoid}), m.h, _streamptr())
+        if rc == 0
+            m.graph_ok = true
+        else
+            @warn("CUDA-graph capture failed — falling back to per-call enqueueV3",
+                  code = rc, detail = _lasterr(m), maxlog = 1)
+        end
+    end
     return nothing
 end
 
@@ -363,8 +380,14 @@ end
 # nothing here or downstream synchronizes the host; stream order alone makes
 # the results visible to whoever reads the output buffers next on this task.
 @inline function _infer!(m::TensorRTModel)
-    rc = ccall(m.api.enqueue, Int32, (Ptr{Cvoid}, Ptr{Cvoid}), m.h, _streamptr())
-    rc == 0 || error("enqueueV3 failed: " * _lasterr(m))
+    s = _streamptr()
+    if m.graph_ok
+        rc = ccall(m.api.replay, Int32, (Ptr{Cvoid}, Ptr{Cvoid}), m.h, s)
+        rc == 0 || error("cudaGraphLaunch failed: " * _lasterr(m))
+    else
+        rc = ccall(m.api.enqueue, Int32, (Ptr{Cvoid}, Ptr{Cvoid}), m.h, s)
+        rc == 0 || error("enqueueV3 failed: " * _lasterr(m))
+    end
     return nothing
 end
 
