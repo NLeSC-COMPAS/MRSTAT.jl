@@ -49,8 +49,7 @@ using BlochSimulators
 using CUDA
 using StructArrays: StructArray
 using ComputationalResources: CUDALibs
-using PythonCall: PythonCall, Py, pyimport, pyconvert, pywith, pydict, pylist
-using NeuralBloch: torch, to_torch, from_torch, on_task_stream
+using PythonCall: PythonCall, Py, pyconvert
 using ..DerivativeOperations: ∂mˣʸ∂T₁T₂
 
 export ForwardModel, BlochModel, SurrogateModel, load_surrogate,

@@ -62,6 +62,7 @@
 ENV["MPLBACKEND"] = "Agg"   # matplotlib without a display; must precede PythonPlot
 
 using MRSTAT
+using NeuralBloch   # activates the surrogate's package extension
 using MRSTAT.TrustRegionReflective: SolverOptions, solver
 using BlochSimulators
 using ComputationalResources: CUDALibs

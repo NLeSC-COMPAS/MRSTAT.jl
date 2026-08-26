@@ -57,5 +57,21 @@ else
     echo "        that has a CUDA-enabled torch, then source this file again." >&2
 fi
 
+# Make the sibling NeuralBloch.jl package loadable in this session: the
+# surrogate lives behind a package extension that activates on
+# `using NeuralBloch`, and appending the checkout to Julia's environment
+# stack is what makes that `using` resolve — without adding the package to
+# this project (BlochModel and TensorRTModel never need it). Skipped
+# silently when the checkout is absent; harmless when Julia never loads it.
+_mrstat_nbjl="${NEURALBLOCH_JL_DIR:-$_mrstat_root/../NeuralBloch.jl}"
+if [ -f "$_mrstat_nbjl/Project.toml" ]; then
+    _mrstat_nbjl="$(cd "$_mrstat_nbjl" && pwd)"
+    case ":${JULIA_LOAD_PATH:-}:" in
+        *":$_mrstat_nbjl:"*) ;;   # already stacked
+        *) export JULIA_LOAD_PATH="${JULIA_LOAD_PATH:-@:@v#.#:@stdlib}:$_mrstat_nbjl" ;;
+    esac
+    echo "MRSTAT: NeuralBloch.jl stacked from $_mrstat_nbjl (surrogate: \`using NeuralBloch\`)"
+fi
+
 unset -f _mrstat_pick_python
-unset _mrstat_root _mrstat_python
+unset _mrstat_root _mrstat_python _mrstat_nbjl

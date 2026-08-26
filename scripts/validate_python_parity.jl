@@ -26,6 +26,7 @@
 using MRSTAT
 using MRSTAT.ForwardModels
 using MRSTAT.ForwardModels: _stage_input!, _dim, _num_layers
+using NeuralBloch   # activates the surrogate's package extension
 using BlochSimulators: T₁T₂B₁ρˣρʸ, gpu, f32
 using StructArrays: StructArray
 using CUDA

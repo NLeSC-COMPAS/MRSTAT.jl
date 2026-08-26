@@ -150,6 +150,10 @@ println("Part 3: parity with the PyTorch surrogate (same trained weights)")
 println("═"^70)
 
 surrogate = try
+    # The surrogate lives behind the NeuralBloch.jl package extension; try to
+    # activate it here — this script must not require it (the TensorRT model
+    # itself never touches NeuralBloch), so failure just skips this part.
+    @eval using NeuralBloch
     load_surrogate()
 catch err
     println("  skipped — surrogate unavailable ($(sprint(showerror, err) |> s -> first(s, 120))…)")

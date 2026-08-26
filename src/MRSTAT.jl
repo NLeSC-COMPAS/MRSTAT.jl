@@ -98,9 +98,9 @@ chosen forward model:
   with a linear 1°–90° flip-angle ramp, simulated and reconstructed with
   the Bloch/EPG model. Needs nothing beyond this package.
 - `:surrogate` — the neural-surrogate experiment: 600 readouts fixed by
-  the trained checkpoint in the sibling NeuralBloch repository (added by
-  the surrogate forward model; requires the torch environment, see the
-  README).
+  the trained checkpoint in the sibling NeuralBloch repository (requires
+  the torch environment and a prior `using NeuralBloch` — the surrogate
+  lives in a package extension; see the README).
 - `:tensorrt` — the same surrogate through its prebuilt TensorRT engine,
   no Python in the loop (requires the shim and engine, see the README).
   The 120×120 phantom is exactly the example engine's optimal batch size.

@@ -23,6 +23,7 @@ ENV["MPLBACKEND"] = "Agg"   # matplotlib without a display; must precede PythonP
 
 using MRSTAT
 using MRSTAT.ForwardModels
+using NeuralBloch   # activates the surrogate's package extension
 using BlochSimulators
 using ComputationalResources: CUDALibs
 using CUDA

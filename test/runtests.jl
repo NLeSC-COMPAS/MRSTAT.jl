@@ -17,6 +17,7 @@
 using Test
 using CUDA
 using MRSTAT
+using NeuralBloch   # activates MRSTATNeuralBlochExt — the surrogate's implementation
 
 # Package-quality checks need no GPU — run them first so they report even on
 # a machine without one.

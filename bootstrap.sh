@@ -68,18 +68,18 @@ print(f"    torch {torch.__version__}, CUDA available: {torch.cuda.is_available(
 PYEOF
 
 # ---------------------------------------------------------------------------
-hdr "4. Sibling checkout (the one Julia path dependency)"
+hdr "4. NeuralBloch.jl (surrogate only)"
 # ---------------------------------------------------------------------------
-# NeuralBloch.jl is not in the General registry, so it is a `Pkg.develop`
-# path dep. Manifest.toml is not tracked, so a fresh clone has none and
-# cannot resolve NeuralBloch at all until step 6 points the dep at this
-# checkout. Every other dependency, BlochSimulators included, comes from
-# the registry and needs nothing here.
+# The bridge package is a *weak* dependency: the project instantiates and the
+# Bloch and TensorRT models run without it. When the checkout is present,
+# env.sh puts it on the Julia load path and `using NeuralBloch` activates the
+# surrogate's package extension; the test suite resolves it from here too
+# (test/Project.toml [sources]).
 if [ -d ../NeuralBloch.jl ]; then
     pass "../NeuralBloch.jl"
 else
-    fail "../NeuralBloch.jl missing — git clone"
-    say  "    https://github.com/NLeSC-COMPAS/NeuralBloch.jl.git beside this repo."
+    say "· ../NeuralBloch.jl missing (surrogate only — Bloch and TensorRT run without it):"
+    say "    git clone https://github.com/NLeSC-COMPAS/NeuralBloch.jl.git beside this repo"
 fi
 
 # ---------------------------------------------------------------------------
@@ -89,12 +89,12 @@ NB="${NEURALBLOCH_DIR:-$ROOT/../NeuralBloch}"
 [ -d "$NB" ] && NB="$(cd "$NB" && pwd)"
 if [ -d "$NB" ]; then
     pass "$NB"
-    [ -f "$NB/src/model.py" ] && pass "  src/model.py" || fail "  src/model.py missing"
+    [ -f "$NB/src/model.py" ] && pass "  src/model.py" || say "· src/model.py missing (the surrogate cannot run without it)"
 else
-    fail "not found at $NB — clone git@github.com:NLeSC-COMPAS/NeuralBloch.git"
-    say  "  beside this repo, or set NEURALBLOCH_DIR to its path. (Only the"
-    say  "  surrogate needs the checkout at runtime — its python model code —"
-    say  "  and it is where the models/ artifacts below are copied from.)"
+    say "· not found at $NB (surrogate only — its python model code lives there,"
+    say "  and it is where the models/ artifacts below are copied from):"
+    say "    git clone git@github.com:NLeSC-COMPAS/NeuralBloch.git beside this repo,"
+    say "    or set NEURALBLOCH_DIR to its path."
 fi
 
 # ---------------------------------------------------------------------------
@@ -124,7 +124,7 @@ artifact() { # <models-relative path> <source path> <required: yes|no> <hint>
         say  "· models/$1 missing (optional) — $4"
     fi
 }
-artifact model.pt     "$NB/outputs/model.pt"     yes "the surrogate checkpoint is gitignored upstream; train it there or copy one in (without it load_surrogate() fails and the tests cannot run)"
+artifact model.pt     "$NB/outputs/model.pt"     no  "only the surrogate needs it; the checkpoint is gitignored upstream — train it there or copy one in (without it load_surrogate() and the test suite cannot run)"
 artifact model.engine "$NB/outputs/model.engine" no  "only the TensorRT model needs it; build it in NeuralBloch (uv run run.py export_onnx && uv run run.py build_engine), then re-run ./bootstrap.sh or copy it in"
 artifact rf_data/rf_angle_list.txt "$NB/data/rf_data/rf_angle_list.txt" no "the validation scripts' ground-truth arm rebuilds the training sequence from it"
 artifact rf_data/rf_phase_list.txt "$NB/data/rf_data/rf_phase_list.txt" no "the validation scripts' ground-truth arm rebuilds the training sequence from it"
@@ -132,19 +132,16 @@ artifact rf_data/rf_phase_list.txt "$NB/data/rf_data/rf_phase_list.txt" no "the 
 # ---------------------------------------------------------------------------
 hdr "7. Julia environment"
 # ---------------------------------------------------------------------------
-if [ -d ../NeuralBloch.jl ]; then
-    export JULIA_CONDAPKG_BACKEND=Null JULIA_PYTHONCALL_EXE="$PY"
-    julia --project=. -e '
-        using Pkg
-        # Point the path dep at THIS machine, then resolve from scratch.
-        Pkg.develop(PackageSpec(path = abspath("../NeuralBloch.jl")))
-        Pkg.instantiate(); Pkg.precompile()' >/tmp/mrstat-bootstrap.$$ 2>&1 \
-        && pass "path dep set, project instantiated and precompiled" \
-        || { fail "Julia setup failed:"; sed 's/^/    /' /tmp/mrstat-bootstrap.$$; }
-    rm -f /tmp/mrstat-bootstrap.$$
-else
-    fail "skipped — ../NeuralBloch.jl missing (see 4)"
-fi
+export JULIA_CONDAPKG_BACKEND=Null JULIA_PYTHONCALL_EXE="$PY"
+julia --project=. -e '
+    using Pkg
+    # Every dependency comes from the General registry — NeuralBloch.jl is a
+    # weak dependency reached through the load path (env.sh), so there is
+    # nothing to develop and no sibling is needed to resolve.
+    Pkg.resolve(); Pkg.instantiate(); Pkg.precompile()' >/tmp/mrstat-bootstrap.$$ 2>&1 \
+    && pass "project resolved, instantiated and precompiled" \
+    || { fail "Julia setup failed:"; sed 's/^/    /' /tmp/mrstat-bootstrap.$$; }
+rm -f /tmp/mrstat-bootstrap.$$
 
 # ---------------------------------------------------------------------------
 hdr "8. TensorRT forward model (optional)"
