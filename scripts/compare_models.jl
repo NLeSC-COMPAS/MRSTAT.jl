@@ -48,6 +48,16 @@
 #      so by Amdahl's law the end-to-end ratio is far below the
 #      forward-model ratio. Reporting only one of these numbers would
 #      mislead in one direction or the other.
+#
+# A third arm — the same surrogate through its TensorRT engine, no Python in
+# the path — joins automatically when its artifacts exist (the shim
+# deps/tensorrt/libtrtjl.so and ../NeuralBloch/outputs/model.engine). It runs
+# the surrogate's exact weights, so instead of minting a third inverse crime
+# it reconstructs the surrogate arm's raw data (the two models agree to
+# ~1e-7 NRMSE, a thousandfold below solver tolerance — self-consistent for
+# every practical purpose, and it makes the surrogate-vs-tensorrt walls a
+# same-problem comparison). Its reports append after the two-arm tables,
+# which stay exactly as they are without it.
 
 ENV["MPLBACKEND"] = "Agg"   # matplotlib without a display; must precede PythonPlot
 
@@ -83,6 +93,23 @@ rf_train = flip_deg .* exp.(1im .* deg2rad.(phase_deg))
 sequence = gpu(f32(FISP3D(rf_train, 0.00558, 0.002745, 64, 0.01084, 0.000, 5, true, true, 1, 0.0)))
 bloch = BlochModel(sequence)
 @assert nechos(bloch) == nechos(surrogate) == 600
+
+# The optional third arm (see the header). `nothing` when its artifacts are
+# absent — every tensorrt block below is guarded on that.
+tensorrt = let
+    shim = joinpath(dirname(@__DIR__), "deps", "tensorrt", "libtrtjl.so")
+    engine = joinpath(neuralbloch_dir, "outputs", "model.engine")
+    if isfile(shim) && isfile(engine)
+        m = load_tensorrt_model()
+        @assert nechos(m) == nechos(surrogate)
+        m
+    else
+        missing_bits = join(vcat(isfile(shim) ? String[] : ["the shim (run deps/tensorrt/build_shim.sh)"],
+                                 isfile(engine) ? String[] : ["the engine (build in ../NeuralBloch)"]), " and ")
+        println("note: TensorRT arm skipped — missing $missing_bits")
+        nothing
+    end
+end
 
 # ---------------------------------------------------------------------------
 # One experiment, two raw-data sets (one per forward model)
@@ -174,6 +201,12 @@ t_fwd_blo = CUDA.@elapsed compute_echos_and_derivatives(bloch, params_true)
 @printf("  surrogate : %8.1f ms\n", 1000t_fwd_sur)
 @printf("  Bloch     : %8.1f ms\n", 1000t_fwd_blo)
 @printf("  ratio     : %8.1f×\n", t_fwd_blo / t_fwd_sur)
+if tensorrt !== nothing
+    compute_echos_and_derivatives(tensorrt, params_true); CUDA.synchronize()
+    t_fwd_trt = CUDA.@elapsed compute_echos_and_derivatives(tensorrt, params_true)
+    @printf("  tensorrt  : %8.1f ms  (%.1f× vs Bloch, %.2f× vs surrogate)\n",
+            1000t_fwd_trt, t_fwd_blo / t_fwd_trt, t_fwd_sur / t_fwd_trt)
+end
 
 # ---------------------------------------------------------------------------
 # The two reconstructions (same bounds: the surrogate's trained box)
@@ -204,6 +237,7 @@ println("═"^72)
 t_warm = @elapsed begin
     warmup!(surrogate, raw_sur)
     warmup!(bloch, raw_bloch)
+    tensorrt === nothing || warmup!(tensorrt, raw_sur)
 end
 @printf("  done in %.1f s — compilation only, excluded from every number below.\n", t_warm)
 
@@ -217,6 +251,14 @@ println("Reconstruction B: BlochModel (self-consistent data — inverse crime)")
 println("═"^72)
 out_blo, calls_blo, wall_blo = instrumented_recon(bloch, raw_bloch; x0, LB, UB)
 
+if tensorrt !== nothing
+    println("═"^72)
+    println("Reconstruction C: TensorRTModel (the surrogate arm's data — same weights)")
+    println("═"^72)
+    global out_trt, calls_trt, wall_trt =
+        instrumented_recon(tensorrt, raw_sur; x0, LB, UB)
+end
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
@@ -228,10 +270,16 @@ maps_sur = report_accuracy(out_sur, "surrogate")
 maps_blo = report_accuracy(out_blo, "Bloch")
 Δ = 100 * median(abs.(maps_sur.T₁ .- maps_blo.T₁) ./ maps_blo.T₁)
 @printf("  arm-vs-arm: median |T₁(surrogate) − T₁(Bloch)| / T₁(Bloch) = %.3f%%\n", Δ)
+if tensorrt !== nothing
+    global maps_trt = report_accuracy(out_trt, "tensorrt")
+    Δtrt = 100 * median(abs.(maps_trt.T₁ .- maps_sur.T₁) ./ maps_sur.T₁)
+    @printf("  arm-vs-arm: median |T₁(tensorrt) − T₁(surrogate)| / T₁(surrogate) = %.3f%%\n", Δtrt)
+end
 
 save_maps(T₁true, T₂true, ρtrue, "ground truth")
 save_maps(maps_sur..., "surrogate")
 save_maps(maps_blo..., "Bloch")
+tensorrt === nothing || save_maps(maps_trt..., "tensorrt")
 println("  maps written to $OUTDIR")
 
 println("═"^72)
@@ -268,6 +316,20 @@ println()
 @printf("  %-36s %10.2f×\n", "end-to-end speedup (surrogate)", wall_blo / wall_sur)
 @printf("  %-36s %10.2f×\n", "  └ upper bound, free forward model",
         wall_blo / (wall_sur - objtotal(calls_sur)))
+if tensorrt !== nothing
+    println()
+    @printf("  %-36s %12s\n", "the TensorRT arm", "tensorrt")
+    @printf("  %-36s %10.1f ms\n", "median mode-0 objective call", level2(calls_trt, 0))
+    @printf("  %-36s %10.1f ms\n", "median mode-2 objective call", level2(calls_trt, 2))
+    @printf("  %-36s %9d/%-3d\n", "objective calls (mode 0/mode 2)",
+            count_mode(calls_trt, 0), count_mode(calls_trt, 2))
+    @printf("  %-36s %10.1f s\n", "time inside the objective (total)", objtotal(calls_trt))
+    @printf("  %-36s %10.1f s\n", "  └ expected: medians × call counts", medianfit(calls_trt))
+    @printf("  %-36s %10.1f s\n", "time in solver internals (H·v, CG)", wall_trt - objtotal(calls_trt))
+    @printf("  %-36s %10.1f s\n", "end-to-end reconstruction", wall_trt)
+    @printf("  %-36s %10.2f×\n", "end-to-end speedup vs Bloch", wall_blo / wall_trt)
+    @printf("  %-36s %10.2f×\n", "end-to-end vs the surrogate arm", wall_sur / wall_trt)
+end
 println()
 println("  Reading the numbers: the surrogate makes the forward model ~",
         round(Int, t_fwd_blo / t_fwd_sur), "× faster, which shows directly in the")
@@ -279,6 +341,13 @@ println("  forward-model comparison: each arm reconstructs its own data, so the"
 println("  solver may take different CG paths. The forward-model ratio (level 1) is")
 println("  the gain available to any solver whose iteration cost is dominated by")
 println("  simulation.")
+if tensorrt !== nothing
+    println()
+    println("  The TensorRT arm runs the surrogate's exact weights with no Python in the")
+    println("  path: what it buys over the surrogate arm is the engine's fused kernels")
+    println("  and the single-graph-launch hot path; what it cannot buy is anything in")
+    println("  the shared solver internals — the same Amdahl ceiling as above.")
+end
 
 println()
 println("compare_models finished")
