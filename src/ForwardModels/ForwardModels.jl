@@ -55,7 +55,7 @@ using ..DerivativeOperations: ∂mˣʸ∂T₁T₂
 
 export ForwardModel, BlochModel, SurrogateModel, load_surrogate,
        TensorRTModel, load_tensorrt_model,
-       neuralbloch_repo,
+       neuralbloch_repo, models_dir,
        compute_echos, compute_echos_and_derivatives, nechos,
        default_bounds, check_experiment
 
@@ -104,6 +104,17 @@ function check_experiment(m::ForwardModel, trajectory, transmit_field)
         "model produces $(nechos(m)) echos per voxel"))
     return nothing
 end
+
+"""
+    models_dir() -> String
+
+The in-repo directory holding the runtime model artifacts (`model.pt`,
+`model.engine`, `rf_data/`), gitignored except for its README. The artifact
+loaders look only here: the sibling NeuralBloch repository is where artifacts
+are *produced*, and `bootstrap.sh` copies them in — see `models/README.md`.
+Override with the `MRSTAT_MODELS_DIR` environment variable.
+"""
+models_dir() = get(ENV, "MRSTAT_MODELS_DIR", joinpath(pkgdir(@__MODULE__), "models"))
 
 # =============================================================================
 # BlochModel — the physical forward model

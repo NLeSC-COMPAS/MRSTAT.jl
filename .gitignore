@@ -4,3 +4,5 @@
 Manifest.toml
 scripts/output/
 .venv
+models/*
+!models/README.md

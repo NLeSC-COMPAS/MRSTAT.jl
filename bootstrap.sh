@@ -83,29 +83,54 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-hdr "5. NeuralBloch python repository (model code, RF tables, checkpoint)"
+hdr "5. NeuralBloch python repository (the surrogate's model code; artifact source)"
 # ---------------------------------------------------------------------------
 NB="${NEURALBLOCH_DIR:-$ROOT/../NeuralBloch}"
 [ -d "$NB" ] && NB="$(cd "$NB" && pwd)"
 if [ -d "$NB" ]; then
     pass "$NB"
-    for f in src/model.py data/rf_data/rf_angle_list.txt data/rf_data/rf_phase_list.txt; do
-        [ -f "$NB/$f" ] && pass "  $f" || fail "  $f missing"
-    done
-    if [ -f "$NB/outputs/model.pt" ]; then
-        pass "  outputs/model.pt ($(du -h "$NB/outputs/model.pt" | cut -f1))"
-    else
-        fail "  outputs/model.pt missing — the checkpoint is gitignored upstream;"
-        say  "    train it there or copy one in. Without it load_surrogate() fails"
-        say  "    and only the BlochModel route works."
-    fi
+    [ -f "$NB/src/model.py" ] && pass "  src/model.py" || fail "  src/model.py missing"
 else
     fail "not found at $NB — clone git@github.com:NLeSC-COMPAS/NeuralBloch.git"
-    say  "  beside this repo, or set NEURALBLOCH_DIR to its path."
+    say  "  beside this repo, or set NEURALBLOCH_DIR to its path. (Only the"
+    say  "  surrogate needs the checkout at runtime — its python model code —"
+    say  "  and it is where the models/ artifacts below are copied from.)"
 fi
 
 # ---------------------------------------------------------------------------
-hdr "6. Julia environment"
+hdr "6. Model artifacts (models/)"
+# ---------------------------------------------------------------------------
+# The runtime artifacts live in-repo under models/ (gitignored): the loaders
+# look only there, never in the sibling checkout. Missing files are copied in
+# from the checkout when it is present — never overwritten — and a copy that
+# differs from the checkout gets a drift warning naming the cp to refresh it.
+MODELS="${MRSTAT_MODELS_DIR:-$ROOT/models}"
+mkdir -p "$MODELS/rf_data"
+artifact() { # <models-relative path> <source path> <required: yes|no> <hint>
+    local dst="$MODELS/$1" src="$2"
+    if [ -f "$dst" ]; then
+        if [ -f "$src" ] && ! cmp -s "$dst" "$src"; then
+            pass "models/$1 ($(du -h "$dst" | cut -f1)) — DIFFERS from the checkout copy"
+            say  "    (rebuilt upstream? refresh with: cp \"$src\" \"$dst\")"
+        else
+            pass "models/$1 ($(du -h "$dst" | cut -f1))"
+        fi
+    elif [ -f "$src" ]; then
+        cp "$src" "$dst"
+        pass "models/$1 — copied in from $src"
+    elif [ "$3" = yes ]; then
+        fail "models/$1 missing — $4"
+    else
+        say  "· models/$1 missing (optional) — $4"
+    fi
+}
+artifact model.pt     "$NB/outputs/model.pt"     yes "the surrogate checkpoint is gitignored upstream; train it there or copy one in (without it load_surrogate() fails and the tests cannot run)"
+artifact model.engine "$NB/outputs/model.engine" no  "only the TensorRT model needs it; build it in NeuralBloch (uv run run.py export_onnx && uv run run.py build_engine), then re-run ./bootstrap.sh or copy it in"
+artifact rf_data/rf_angle_list.txt "$NB/data/rf_data/rf_angle_list.txt" no "the validation scripts' ground-truth arm rebuilds the training sequence from it"
+artifact rf_data/rf_phase_list.txt "$NB/data/rf_data/rf_phase_list.txt" no "the validation scripts' ground-truth arm rebuilds the training sequence from it"
+
+# ---------------------------------------------------------------------------
+hdr "7. Julia environment"
 # ---------------------------------------------------------------------------
 if [ -d ../NeuralBloch.jl ]; then
     export JULIA_CONDAPKG_BACKEND=Null JULIA_PYTHONCALL_EXE="$PY"
@@ -122,21 +147,41 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-hdr "7. TensorRT forward model (optional)"
+hdr "8. TensorRT forward model (optional)"
 # ---------------------------------------------------------------------------
-# Only load_tensorrt_model() needs these two; the Bloch and surrogate routes
-# are complete without them, so absences here are informational, never
-# counted as failures.
-if [ -f "$NB/outputs/model.engine" ]; then
-    pass "engine: $NB/outputs/model.engine ($(du -h "$NB/outputs/model.engine" | cut -f1))"
+# The TensorRT *runtime* is a system prerequisite — NVIDIA's Debian/RPM
+# packages, matching the engine's version; this script detects and hints,
+# never installs. The Bloch and surrogate routes are complete without it.
+#   https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/installing.html
+ENGINE="$MODELS/model.engine"
+ENG_VER=""
+[ -f "$ENGINE" ] && \
+    ENG_VER="$(od -A n -t u1 -j 24 -N 4 "$ENGINE" | awk '{print $1"."$2"."$3"."$4}')"
+TRT_LIB="$(ldconfig -p 2>/dev/null | sed -n 's/.*=> \(.*libnvinfer\.so\.[0-9]*\)$/\1/p' | head -1)"
+if [ -n "$TRT_LIB" ]; then
+    LIB_VER="$(nm -D "$TRT_LIB" 2>/dev/null | grep -o 'tensorrt_version_[0-9_]*' | head -1 \
+               | sed 's/tensorrt_version_//; s/_/./g')"
+    pass "system TensorRT ${LIB_VER:-unknown} ($TRT_LIB)"
+    if [ -n "$ENG_VER" ] && [ -n "$LIB_VER" ] && [ "$ENG_VER" != "$LIB_VER" ]; then
+        fail "models/model.engine was built with TensorRT $ENG_VER, the system has $LIB_VER"
+        say  "    engines are version-locked: install TensorRT $ENG_VER (list versions with"
+        say  "    apt-cache madison libnvinfer${ENG_VER%%.*}) or rebuild the engine in"
+        say  "    NeuralBloch, then re-run deps/tensorrt/build_shim.sh."
+    fi
 else
-    say "· engine absent at $NB/outputs/model.engine — build it in NeuralBloch:"
-    say "    uv run run.py export_onnx && uv run run.py build_engine"
+    MAJ="${ENG_VER%%.*}"
+    say "· system TensorRT not installed (optional; only the TensorRT model needs it):"
+    say "    Debian/Ubuntu: sudo apt-get install libnvinfer${MAJ:-<major>} libnvinfer-headers-dev libnvinfer-dev"
+    say "    RPM:           sudo dnf install libnvinfer${MAJ:-<major>} libnvinfer-headers-devel libnvinfer-devel"
+    if [ -n "$ENG_VER" ]; then
+        say "    models/model.engine needs exactly version $ENG_VER — list what the NVIDIA"
+        say "    repo offers with 'apt-cache madison libnvinfer$MAJ' and pin that version."
+    fi
 fi
 if [ -f "$ROOT/deps/tensorrt/libtrtjl.so" ]; then
     pass "shim:   deps/tensorrt/libtrtjl.so"
 else
-    say "· shim not built — run deps/tensorrt/build_shim.sh once to enable it"
+    say "· shim not built — run deps/tensorrt/build_shim.sh once to enable the TensorRT model"
 fi
 
 # ---------------------------------------------------------------------------
