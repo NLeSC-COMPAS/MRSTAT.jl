@@ -31,5 +31,6 @@ CUDA.functional() || error(
 const SURROGATE = load_surrogate()
 
 include("test_forwardmodels.jl")
+include("test_tensorrt.jl")
 include("test_objective.jl")
 include("test_synthetic_data.jl")
