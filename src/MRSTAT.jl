@@ -101,9 +101,12 @@ chosen forward model:
   the trained checkpoint in the sibling NeuralBloch repository (added by
   the surrogate forward model; requires the torch environment, see the
   README).
+- `:tensorrt` — the same surrogate through its prebuilt TensorRT engine,
+  no Python in the loop (requires the shim and engine, see the README).
+  The 120×120 phantom is exactly the example engine's optimal batch size.
 
-Both use the same 120×120 phantom geometry, so the two forward models can
-be compared like for like (`scripts/compare_models.jl` does exactly that).
+All use the same 120×120 phantom geometry, so the forward models can be
+compared like for like (`scripts/compare_models.jl` does exactly that).
 """
 function example_mrstat_recon(kind::Symbol = :bloch)
     N, K = 120, 5
@@ -117,8 +120,10 @@ function example_mrstat_recon(kind::Symbol = :bloch)
         BlochModel(gpu(f32(sequence)))
     elseif kind === :surrogate
         load_surrogate()
+    elseif kind === :tensorrt
+        load_tensorrt_model()
     else
-        throw(ArgumentError("unknown forward model kind $kind — use :bloch or :surrogate"))
+        throw(ArgumentError("unknown forward model kind $kind — use :bloch, :surrogate or :tensorrt"))
     end
 
     raw_data, coordinates, coil_sensitivities, trajectory, transmit_field, _ =

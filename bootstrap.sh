@@ -122,6 +122,24 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+hdr "7. TensorRT forward model (optional)"
+# ---------------------------------------------------------------------------
+# Only load_tensorrt_model() needs these two; the Bloch and surrogate routes
+# are complete without them, so absences here are informational, never
+# counted as failures.
+if [ -f "$NB/outputs/model.engine" ]; then
+    pass "engine: $NB/outputs/model.engine ($(du -h "$NB/outputs/model.engine" | cut -f1))"
+else
+    say "· engine absent at $NB/outputs/model.engine — build it in NeuralBloch:"
+    say "    uv run run.py export_onnx && uv run run.py build_engine"
+fi
+if [ -f "$ROOT/deps/tensorrt/libtrtjl.so" ]; then
+    pass "shim:   deps/tensorrt/libtrtjl.so"
+else
+    say "· shim not built — run deps/tensorrt/build_shim.sh once to enable it"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n\033[1m%d ok, %d missing\033[0m\n' "$ok" "$bad"
 if [ "$bad" -eq 0 ]; then
     cat <<'EOF'
@@ -129,7 +147,7 @@ if [ "$bad" -eq 0 ]; then
 Ready. Every session from now on:
 
     source env.sh
-    julia --project=. -e 'using Pkg; Pkg.test()'      # 128 tests
+    julia --project=. -e 'using Pkg; Pkg.test()'      # 169 tests
     julia --project=. scripts/compare_models.jl       # the comparison
 EOF
 else
