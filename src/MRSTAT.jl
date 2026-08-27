@@ -27,6 +27,7 @@ using .ForwardModels
 # surrogate implementation is included there.)
 export ForwardModel, BlochModel, SurrogateModel, load_surrogate,
        TensorRTModel, load_tensorrt_model,
+       PythonModel, load_python_model,
        neuralbloch_repo, models_dir,
        compute_echos, compute_echos_and_derivatives, nechos,
        default_bounds, check_experiment,
@@ -104,6 +105,10 @@ chosen forward model:
 - `:tensorrt` — the same surrogate through its prebuilt TensorRT engine,
   no Python in the loop (requires the shim and engine, see the README).
   The 120×120 phantom is exactly the example engine's optimal batch size.
+- `:python` — the same checkpoint through the naive PythonCall baseline:
+  ordinary conversions and host round trips at every crossing, no
+  NeuralBloch.jl bridge needed. Deliberately the slow arm — it is the
+  reference the other two learned models are measured against.
 
 All use the same 120×120 phantom geometry, so the forward models can be
 compared like for like (`scripts/compare_models.jl` does exactly that).
@@ -122,8 +127,11 @@ function example_mrstat_recon(kind::Symbol = :bloch)
         load_surrogate()
     elseif kind === :tensorrt
         load_tensorrt_model()
+    elseif kind === :python
+        load_python_model()
     else
-        throw(ArgumentError("unknown forward model kind $kind — use :bloch, :surrogate or :tensorrt"))
+        throw(ArgumentError("unknown forward model kind $kind — use :bloch, " *
+                            ":surrogate, :tensorrt or :python"))
     end
 
     raw_data, coordinates, coil_sensitivities, trajectory, transmit_field, _ =

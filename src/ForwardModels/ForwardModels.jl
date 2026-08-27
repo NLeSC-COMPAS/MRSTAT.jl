@@ -18,6 +18,10 @@ This module defines that two-function interface and its implementations:
 - `TensorRTModel` (see `tensorrt.jl`) — the compiled route: the same
   trained network, run through its prebuilt TensorRT engine via a C shim
   and `ccall` — no Python anywhere in the path.
+- `PythonModel` (see `python.jl`) — the naive route, and the comparison's
+  baseline: the same trained network through PythonCall and PyTorch with
+  ordinary conversions and copies at every crossing. Deliberately not
+  optimized, so the other two learned models can be measured against it.
 
 # The interface
 
@@ -49,11 +53,13 @@ using BlochSimulators
 using CUDA
 using StructArrays: StructArray
 using ComputationalResources: CUDALibs
-using PythonCall: PythonCall, Py, pyconvert
+using PythonCall: PythonCall, Py, pyconvert, pyimport, pywith, pydict, pylist,
+                  pyhasattr
 using ..DerivativeOperations: ∂mˣʸ∂T₁T₂
 
 export ForwardModel, BlochModel, SurrogateModel, load_surrogate,
        TensorRTModel, load_tensorrt_model,
+       PythonModel, load_python_model,
        neuralbloch_repo, models_dir,
        compute_echos, compute_echos_and_derivatives, nechos,
        default_bounds, check_experiment
@@ -163,5 +169,10 @@ include("surrogate.jl")
 
 # The compiled forward model (TensorRTModel + load_tensorrt_model).
 include("tensorrt.jl")
+
+# The naive python baseline (PythonModel + load_python_model). Included after
+# surrogate.jl: it reuses that file's artifact resolution (neuralbloch_repo,
+# pystr_path) and checkpoint-shape helpers (_dim, _num_layers).
+include("python.jl")
 
 end # module ForwardModels
