@@ -57,8 +57,10 @@ hint() {
     [ -n "$maj" ] || maj="<major>"
     say "TensorRT is a system prerequisite of the TensorRT forward model, installed"
     say "through NVIDIA's packages — never by this repository:"
-    say "  Debian/Ubuntu: sudo apt-get install libnvinfer$maj libnvinfer-headers-dev libnvinfer-dev"
-    say "  RPM:           sudo dnf install libnvinfer$maj libnvinfer-headers-devel libnvinfer-devel"
+    say "  Debian/Ubuntu: sudo apt-get install libnvinfer$maj libnvinfer-headers-dev"
+    say "  RPM:           sudo dnf install libnvinfer$maj libnvinfer-headers-devel"
+    say "   (The headers are needed only for the compile, and fetched from"
+    say "   github.com/NVIDIA/TensorRT when absent.)"
     if [ -n "$REQ_VER" ]; then
         say "models/model.engine requires exactly TensorRT $REQ_VER — list what the NVIDIA"
         say "repo offers with 'apt-cache madison libnvinfer$maj' and pin that version."

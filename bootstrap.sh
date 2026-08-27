@@ -168,8 +168,8 @@ if [ -n "$TRT_LIB" ]; then
 else
     MAJ="${ENG_VER%%.*}"
     say "· system TensorRT not installed (optional; only the TensorRT model needs it):"
-    say "    Debian/Ubuntu: sudo apt-get install libnvinfer${MAJ:-<major>} libnvinfer-headers-dev libnvinfer-dev"
-    say "    RPM:           sudo dnf install libnvinfer${MAJ:-<major>} libnvinfer-headers-devel libnvinfer-devel"
+    say "    Debian/Ubuntu: sudo apt-get install libnvinfer${MAJ:-<major>} libnvinfer-headers-dev"
+    say "    RPM:           sudo dnf install libnvinfer${MAJ:-<major>} libnvinfer-headers-devel"
     if [ -n "$ENG_VER" ]; then
         say "    models/model.engine needs exactly version $ENG_VER — list what the NVIDIA"
         say "    repo offers with 'apt-cache madison libnvinfer$MAJ' and pin that version."
