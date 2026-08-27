@@ -81,11 +81,13 @@ end
 @testset "SurrogateModel: loading" begin
     @test SURROGATE isa SurrogateModel
     @test nechos(SURROGATE) == 600
-    # eval mode and CUDA placement, read off the live torch module
+    # eval mode and CUDA placement, read off the live torch module (the
+    # decoder is Sequential(Linear, Unflatten); its Linear sits at [0])
     @test pyconvert(Bool, SURROGATE.model.training) == false
-    @test pyconvert(Bool, SURROGATE.model.U_signal.weight.is_cuda)
-    # decoder shape after the load-time row permutation is unchanged
-    @test pyconvert(Int, SURROGATE.model.U_signal.weight.shape[0]) == 2 * nechos(SURROGATE)
+    @test pyconvert(Bool, SURROGATE.model.U_signal[0].weight.is_cuda)
+    # the decoder's Linear emits 2·NTR values per voxel, unflattened to
+    # (NTR, 2) pairs by the layer behind it
+    @test pyconvert(Int, SURROGATE.model.U_signal[0].weight.shape[0]) == 2 * nechos(SURROGATE)
     # the trained box is the default search region
     x0, LB, UB = default_bounds(SURROGATE)
     @test UB.T₁ == log(5.0) && UB.T₂ == log(2.0)
@@ -102,14 +104,12 @@ end
     n = _stage_input!(SURROGATE, params)
     @test n == 17
     @test size(SURROGATE.Xbuf) == (3, 17)
-    # The staged rows must be [log T₁; log T₂; B₁]. The expected logs are
-    # computed with the same GPU broadcast the staging uses, so the
-    # comparison can demand exact equality — comparing against CPU
-    # Base.log instead could differ by a last-bit rounding difference and
-    # would force a tolerance for no gain.
-    @test maximum(abs, Array(SURROGATE.Xbuf[1, :]) .- Array(log.(params.T₁))) == 0
-    @test maximum(abs, Array(SURROGATE.Xbuf[2, :]) .- Array(log.(params.T₂))) == 0
-    @test maximum(abs, Array(SURROGATE.Xbuf[3, :]) .- Array(params.B₁)) == 0
+    # The staged rows must be the physical [T₁; T₂; B₁] — the model applies
+    # the log to T₁/T₂ internally — so staging is a plain copy and exact
+    # equality holds.
+    @test Array(SURROGATE.Xbuf[1, :]) == Array(params.T₁)
+    @test Array(SURROGATE.Xbuf[2, :]) == Array(params.T₂)
+    @test Array(SURROGATE.Xbuf[3, :]) == Array(params.B₁)
 
     # Same voxel count → the buffer is reused, not reallocated.
     buf = SURROGATE.Xbuf

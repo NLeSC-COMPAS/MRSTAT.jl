@@ -17,7 +17,7 @@ using MRSTAT.ForwardModels: ForwardModels, SurrogateModel, neuralbloch_repo, mod
 import MRSTAT.ForwardModels: compute_echos, compute_echos_and_derivatives
 using MRSTAT.DerivativeOperations: ∂mˣʸ∂T₁T₂
 using NeuralBloch: torch, to_torch, from_torch, on_task_stream
-using PythonCall: Py, pyimport, pyconvert, pywith, pydict, pylist
+using PythonCall: Py, pyimport, pyconvert, pywith, pydict, pylist, pyhasattr
 using CUDA
 using StructArrays: StructArray
 
@@ -58,11 +58,13 @@ function _load_surrogate(;
     sd = ckpt["model_state"]
     keys = pyconvert(Vector{String}, pylist(sd.keys()))
 
+    # The decoders are Sequential(Linear, Unflatten), so their Linear weights
+    # sit at the `U_*.0.weight` keys.
     config = pydict(Dict{String,Int}(
         "input_dim"          => _dim(sd, "subnet_signal.net.0.weight", 2),
-        "NB_signal"          => _dim(sd, "U_signal.weight", 2),
-        "NB_dT1"             => _dim(sd, "U_dT1.weight", 2),
-        "NB_dT2"             => _dim(sd, "U_dT2.weight", 2),
+        "NB_signal"          => _dim(sd, "U_signal.0.weight", 2),
+        "NB_dT1"             => _dim(sd, "U_dT1.0.weight", 2),
+        "NB_dT2"             => _dim(sd, "U_dT2.0.weight", 2),
         "hidden_size_signal" => _dim(sd, "subnet_signal.net.0.weight", 1),
         "hidden_size_dT1"    => _dim(sd, "subnet_dT1.net.0.weight", 1),
         "hidden_size_dT2"    => _dim(sd, "subnet_dT2.net.0.weight", 1),
@@ -70,49 +72,38 @@ function _load_surrogate(;
         "num_layers_dT1"     => _num_layers(keys, "subnet_dT1"),
         "num_layers_dT2"     => _num_layers(keys, "subnet_dT2"),
     ))
-    _dim(sd, "U_signal.weight", 1) == 2NTR || error(
-        "checkpoint inconsistent: U_signal has $(_dim(sd, "U_signal.weight", 1)) " *
+    _dim(sd, "U_signal.0.weight", 1) == 2NTR || error(
+        "checkpoint inconsistent: U_signal has $(_dim(sd, "U_signal.0.weight", 1)) " *
         "rows but NTR = $NTR expects $(2NTR)")
 
     model = FCModel(NTR, config)
     model.load_state_dict(sd)   # strict=True: validates every key and shape
     model.eval()
 
-    # What follows re-orders the decoder outputs, so first record what the
-    # untouched model produces on a fixed probe input — the self-check below
-    # compares against this reference.
-    probe = tm.tensor(((0.18f0, -2.53f0, 1.05f0),))   # some [logT₁, logT₂, B₁]
-    ref = pywith(tm.no_grad()) do _
-        model(probe)
+    # Contract guard: the model takes physical [T₁, T₂, B₁] (it applies the
+    # log to T₁/T₂ internally) and emits each output as (batch, NTR, 2) with
+    # (Re, Im) paired on the last axis; forward_signal is the signal-only
+    # sub-path compute_echos runs, sharing the input transform and signal
+    # head with the full forward. Probe both once on the CPU model and
+    # refuse to continue on any disagreement — every zero-copy view
+    # downstream builds on exactly these shapes.
+    pyhasattr(model, "forward_signal") || error(
+        "the FCModel at $neuralbloch_dir has no forward_signal method — " *
+        "update the NeuralBloch checkout (the signal-only fast path needs it)")
+    probe = tm.tensor(((1.2f0, 0.08f0, 1.05f0),))   # physical [T₁, T₂, B₁], in-box
+    out, sig = pywith(tm.no_grad()) do _
+        model(probe), model.forward_signal(probe)
     end
-
-    # Re-order the rows of the three decoder matrices so the model emits
-    # complex values as adjacent (Re, Im) pairs instead of two separate
-    # halves. This is what makes the zero-copy complex output possible, and
-    # it costs nothing at inference time: permuting the rows of a bias-free
-    # Linear layer permutes its output features exactly. The permutation
-    # [0, NTR, 1, NTR+1, …] puts old row k (Re of echo k+1) at position 2k
-    # and old row NTR+k (Im of echo k+1) at position 2k+1.
-    perm = tm.stack((tm.arange(0, NTR), tm.arange(NTR, 2NTR)); dim = 1).reshape(-1)
-    for U in (model.U_signal, model.U_dT1, model.U_dT2)
-        U.weight.data = U.weight.data.index_select(0, perm)
-    end
-
-    # Self-check: undoing the interleave on the permuted model's output must
-    # reproduce the reference bit-for-bit. Exact comparison (torch.equal) is
-    # correct here because a row permutation only reorders whole dot
-    # products — it cannot change any individual value — so any difference
-    # at all means the assumed checkpoint layout is wrong.
-    out = pywith(tm.no_grad()) do _
-        model(probe)
-    end
+    shape(t::Py) = pyconvert(Vector{Int}, pylist(t.shape))
     for i in 0:2
-        deinterleaved = out[i].view(1, NTR, 2).transpose(1, 2).reshape(1, 2NTR)
-        pyconvert(Bool, tm.equal(deinterleaved, ref[i])) || error(
-            "surrogate load self-check failed: permuted decoder output " *
-            "$(i) does not match the checkpoint's layout — refusing to " *
-            "continue with a mis-ordered model")
+        shape(out[i]) == [1, NTR, 2] || error(
+            "surrogate load self-check failed: output $i has shape " *
+            "$(shape(out[i])), expected (1, $NTR, 2) — the model code's " *
+            "output contract has drifted from what this wrapper expects")
     end
+    pyconvert(Bool, tm.equal(sig, out[0])) || error(
+        "surrogate load self-check failed: forward_signal disagrees with " *
+        "the full forward — refusing to continue with a divergent fast path")
 
     model = model.cuda()
     model.eval()
@@ -120,12 +111,11 @@ function _load_surrogate(;
     return SurrogateModel(model, NTR, CUDA.CuMatrix{Float32}(undef, 3, 0))
 end
 
-# View a raw (N, 2·NTR) network output as an (N, NTR) complex tensor,
-# without copying anything. This only works because load_surrogate permuted
-# the decoder rows so that adjacent value pairs are already (Re, Im) of one
-# echo; both `view` and `view_as_complex` then just reinterpret the same
+# View a (N, NTR, 2) network output — (Re, Im) paired on the last axis, the
+# layout the model's decoders emit natively — as an (N, NTR) complex tensor
+# without copying anything: view_as_complex just reinterprets the same
 # memory.
-_as_complex(tm::Py, t::Py, N::Int, NTR::Int) = tm.view_as_complex(t.view(N, NTR, 2))
+_as_complex(tm::Py, t::Py) = tm.view_as_complex(t)
 
 # --- the interface implementation ---------------------------------------------
 
@@ -137,8 +127,11 @@ Predict the echo train for every voxel with the signal sub-network:
 indexed `echos[readout, voxel]`, at unit proton density.
 
 This is the cheap path for objective mode 0 (cost/residual evaluations
-during the solver's step-acceptance loop): it runs only the signal
-sub-network, because those evaluations never use the derivatives.
+during the solver's step-acceptance loop): it runs `FCModel.forward_signal`
+— the input transform, signal sub-network and signal decoder only — because
+those evaluations never use the derivatives. `forward_signal` shares its
+modules with the full forward, so the two paths agree bitwise (checked once
+at load time).
 
 The result is zero-copy in both directions: the returned Julia matrix wraps
 torch's output buffer directly (and keeps the tensor alive for as long as
@@ -147,13 +140,12 @@ current Julia task's CUDA stream, any Julia kernel that later reads `echos`
 on this task is automatically ordered after it — no fences.
 """
 function compute_echos(s::SurrogateModel, parameters)
-    N = _stage_input!(s, parameters)
+    _stage_input!(s, parameters)
     tm = torch()
     mc = on_task_stream() do
         X = to_torch(s.Xbuf; sync = false, layout = :reversed)  # (N, 3), zero-copy
         pywith(tm.no_grad()) do _
-            m = s.model.U_signal(s.model.subnet_signal(X))
-            _as_complex(tm, m, N, s.NTR)
+            _as_complex(tm, s.model.forward_signal(X))   # (N, NTR, 2)
         end
     end
     # torch's row-major (N, NTR) complex tensor is, byte for byte, a Julia
@@ -175,15 +167,15 @@ The log-space chain rule (`∂/∂log T = T·∂/∂T`) is *not* applied here; t
 kernels' `lin_scale` factors do that, unchanged.
 """
 function compute_echos_and_derivatives(s::SurrogateModel, parameters)
-    N = _stage_input!(s, parameters)
+    _stage_input!(s, parameters)
     tm = torch()
     mc, d1c, d2c = on_task_stream() do
         X = to_torch(s.Xbuf; sync = false, layout = :reversed)
         pywith(tm.no_grad()) do _
-            out = s.model(X)   # (signal, dm/dT₁, dm/dT₂), each (N, 2·NTR)
-            (_as_complex(tm, out[0], N, s.NTR),
-             _as_complex(tm, out[1], N, s.NTR),
-             _as_complex(tm, out[2], N, s.NTR))
+            out = s.model(X)   # (signal, dm/dT₁, dm/dT₂), each (N, NTR, 2)
+            (_as_complex(tm, out[0]),
+             _as_complex(tm, out[1]),
+             _as_complex(tm, out[2]))
         end
     end
     echos = from_torch(mc; sync = false)

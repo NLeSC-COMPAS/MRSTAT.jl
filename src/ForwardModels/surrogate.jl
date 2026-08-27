@@ -11,7 +11,8 @@
 # description of the input buffer (via NeuralBloch.jl's DLPack export) and
 # wraps torch's output buffers directly as Julia arrays (tensor-pointer
 # wrap). The only device work besides the network itself is three small
-# broadcasts that write `[log T₁, log T₂, B₁]` into the input buffer. All of
+# broadcasts that write the physical `[T₁, T₂, B₁]` into the input buffer
+# (the model converts to its internal log coordinates itself). All of
 # it — staging broadcasts, torch kernels, and the reconstruction's own CUDA
 # kernels afterwards — is queued on the current Julia task's stream
 # (`on_task_stream`), which guarantees execution order by itself, so no
@@ -33,16 +34,16 @@
 """
     SurrogateModel <: ForwardModel
 
-Handle to the loaded surrogate: the FCModel (on the GPU, in eval mode, with
-its decoder matrices re-ordered for zero-copy complex output — see
-[`load_surrogate`](@ref)), the echo-train length `NTR` it was trained for,
-and a persistent `(3, N)` input staging buffer that is (re)allocated only
-when the voxel count changes.
+Handle to the loaded surrogate: the FCModel (on the GPU, in eval mode — its
+natively paired (Re, Im) outputs alias directly as Julia `ComplexF32`
+matrices, see [`load_surrogate`](@ref)), the echo-train length `NTR` it was
+trained for, and a persistent `(3, N)` input staging buffer that is
+(re)allocated only when the voxel count changes.
 """
 mutable struct SurrogateModel <: ForwardModel
-    model::Py                     # FCModel: .cuda().eval(), U rows permuted
+    model::Py                     # FCModel: .cuda().eval()
     NTR::Int                      # echo-train length baked into the checkpoint
-    Xbuf::CUDA.CuMatrix{Float32}  # (3, N) staging: rows = log T₁, log T₂, B₁
+    Xbuf::CUDA.CuMatrix{Float32}  # (3, N) staging: rows = T₁, T₂, B₁ (physical)
 end
 
 Base.show(io::IO, s::SurrogateModel) =
@@ -122,15 +123,13 @@ Load the trained surrogate for use as a reconstruction forward model.
   re-implementation — and rebuilds the architecture with dimensions derived
   from the checkpoint's weight shapes.
 - Loads the checkpoint strictly (every key and shape validated).
-- **Re-orders the rows of the three decoder matrices** `U_signal`/`U_dT1`/
-  `U_dT2` from the training layout (complex values as concatenated halves
-  `[re₁..re_NTR | im₁..im_NTR]`) to interleaved pairs
-  `[re₁, im₁, re₂, im₂, …]`. The matrices are bias-free, so this is an exact
-  permutation of output features with zero runtime cost — and it makes
-  `torch.view_as_complex` a free view, which is what lets the outputs come
-  back to Julia as `ComplexF32` matrices without any interleaving copy.
-  The permutation is verified numerically against the unpermuted model
-  before the function returns.
+- **Verifies the model's I/O contract on a probe input** before returning:
+  physical `[T₁, T₂, B₁]` in (the model applies the log to T₁/T₂ itself),
+  each output `(batch, NTR, 2)` with (Re, Im) paired on the last axis —
+  the layout that makes `torch.view_as_complex` a free view, which is what
+  lets the outputs come back to Julia as `ComplexF32` matrices without any
+  interleaving copy — and `forward_signal` (the signal-only fast path)
+  agreeing bitwise with the full forward.
 - Moves the model to the GPU in eval mode.
 
 This is the only place torch is imported — loading MRSTAT alone never
@@ -170,11 +169,11 @@ pystr_path(p::AbstractString) = PythonCall.pystr(String(p))
 # --- input staging -----------------------------------------------------------
 
 # Write the network's input for the current tissue parameters into the
-# persistent (3, N) staging buffer: row 1 = log T₁, row 2 = log T₂,
-# row 3 = B₁. These raw values are exactly what the model was trained on —
-# NeuralBloch's data pipeline (data_loading.py) applies the logs and nothing
-# else, no normalization. The buffer lives in the model handle and is only
-# reallocated when the voxel count changes, so during a reconstruction
+# persistent (3, N) staging buffer: row 1 = T₁, row 2 = T₂, row 3 = B₁ —
+# physical units, the model's public input format (FCModel applies the log
+# to T₁/T₂ internally; NeuralBloch's data pipeline feeds physical values and
+# applies no normalization). The buffer lives in the model handle and is
+# only reallocated when the voxel count changes, so during a reconstruction
 # (fixed voxel count, many objective evaluations) this function performs
 # three small GPU broadcasts and allocates nothing.
 function _stage_input!(s::SurrogateModel, parameters)
@@ -188,8 +187,8 @@ function _stage_input!(s::SurrogateModel, parameters)
     end
     X = s.Xbuf
     @views begin
-        X[1, :] .= log.(T₁)
-        X[2, :] .= log.(parameters.T₂)
+        X[1, :] .= T₁
+        X[2, :] .= parameters.T₂
         X[3, :] .= parameters.B₁
     end
     return N
