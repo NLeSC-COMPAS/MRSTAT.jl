@@ -3,23 +3,24 @@
 # =============================================================================
 #
 # Runs the same trained NeuralBloch surrogate as `SurrogateModel`, but through
-# its prebuilt TensorRT engine (`outputs/model.engine` in the sibling
-# repository) instead of the live PyTorch module. No Python is involved
-# anywhere: Julia ccalls into `deps/tensorrt/libtrtjl.so`, a thin C wrapper
-# over the TensorRT C++ runtime (built once by `deps/tensorrt/build_shim.sh`).
+# its prebuilt TensorRT engine (`models/model.engine`, produced upstream)
+# instead of the live PyTorch module. No Python is involved anywhere: Julia
+# ccalls into `deps/tensorrt/libtrtjl.so`, a thin C wrapper over the TensorRT
+# C++ runtime (built once by `deps/tensorrt/build_shim.sh`).
 #
-# Data crossing is zero-copy on the input and one broadcast on each output:
-# the persistent `(3, N)` staging buffer is byte-identical to the engine's
-# row-major `(N, 3)` input tensor, so its raw device pointer is bound directly
-# (`setTensorAddress`) and TensorRT reads it in place. The engine writes its
-# `(N, 2·NTR)` outputs into persistent buffers the same way; those store each
-# voxel's echo train as two concatenated halves `[Re₁..Re_NTR | Im₁..Im_NTR]`
-# — a layout frozen into the engine at export time — so one fused broadcast
-# per output combines the halves into the `(NTR, N)` ComplexF32 matrix the
-# reconstruction kernels index. That broadcast is the only copy in the path.
+# Data crossing is zero-copy on the input and one contiguous copy on each
+# consumed output: the persistent `(3, N)` staging buffer is byte-identical to
+# the engine's row-major `(N, 3)` input tensor, so its raw device pointer is
+# bound directly (`setTensorAddress`) and TensorRT reads it in place. Each
+# engine output is a row-major `(N, NTR, 2)` FP32 tensor with (Re, Im) paired
+# on the last axis — byte for byte a column-major `(NTR, N)` ComplexF32 Julia
+# matrix — so the persistent output buffers are allocated as exactly that and
+# the engine writes complex values into them directly. Producing a result is
+# then one stream-ordered device memcpy per consumed output (see _combine for
+# why it must be a copy), with no gather or reinterpretation anywhere.
 #
-# Everything — staging broadcasts, the engine enqueue, the combine broadcasts,
-# and the reconstruction's own kernels afterwards — runs on the current Julia
+# Everything — staging broadcasts, the engine enqueue, the output copies, and
+# the reconstruction's own kernels afterwards — runs on the current Julia
 # task's CUDA stream, so execution order is guaranteed by the stream alone and
 # no host synchronization happens anywhere.
 #
@@ -74,9 +75,9 @@ TrtApi(lib::Ptr{Cvoid}) =
 Handle to the loaded engine: the shim context, the echo-train length `NTR`
 and admissible batch range read from the engine itself, and the persistent
 device buffers TensorRT is bound to — the `(3, N)` input staging buffer and
-one raw `(2·NTR, N)` buffer per output. Buffers are (re)allocated and rebound
-only when the voxel count changes; holding them as fields keeps them rooted
-for as long as TensorRT holds their raw pointers.
+one `(NTR, N)` ComplexF32 buffer per output. Buffers are (re)allocated and
+rebound only when the voxel count changes; holding them as fields keeps them
+rooted for as long as TensorRT holds their raw pointers.
 """
 mutable struct TensorRTModel <: ForwardModel
     h::Ptr{Cvoid}                       # shim context (runtime+engine+execution context)
@@ -86,10 +87,10 @@ mutable struct TensorRTModel <: ForwardModel
     optB::Int                           #   optimization profile (MIN/OPT/MAX)
     maxB::Int
     N::Int                              # currently bound batch size (0 = none yet)
-    Xbuf::CUDA.CuMatrix{Float32}        # (3, N) staging: rows = log T₁, log T₂, B₁
-    raw_signal::CUDA.CuMatrix{Float32}  # (2NTR, N) halves layout, written by the engine
-    raw_dT1::CUDA.CuMatrix{Float32}
-    raw_dT2::CUDA.CuMatrix{Float32}
+    Xbuf::CUDA.CuMatrix{Float32}        # (3, N) staging: rows = T₁, T₂, B₁ (physical)
+    raw_signal::CUDA.CuMatrix{ComplexF32}  # (NTR, N); byte-identical to the engine's
+    raw_dT1::CUDA.CuMatrix{ComplexF32}     #   row-major (N, NTR, 2) FP32 output, so
+    raw_dT2::CUDA.CuMatrix{ComplexF32}     #   the engine writes complex values in place
     use_graph::Bool                     # capture a CUDA graph per batch size?
     graph_ok::Bool                      # a graph for the current binding is live
 end
@@ -169,11 +170,12 @@ Load the prebuilt TensorRT engine as a reconstruction forward model.
   submission instead of one launch per engine layer.
 
 The loader validates the engine against the contract this model expects —
-one FP32 input `x` of shape `(batch, 3)` and three FP32 outputs
-`signal`/`dT1`/`dT2` of shape `(batch, 2·NTR)` — and reads `NTR` plus the
-admissible batch range from the engine, so an engine rebuilt upstream with a
-different profile (or echo count) is picked up automatically or rejected
-loudly, never mis-read.
+one FP32 input `x` of shape `(batch, 3)` (physical `[T₁, T₂, B₁]`; the
+engine's exported graph applies the log to T₁/T₂ itself) and three FP32
+outputs `signal`/`dT1`/`dT2` of shape `(batch, NTR, 2)` with (Re, Im) paired
+on the last axis — and reads `NTR` plus the admissible batch range from the
+engine, so an engine rebuilt upstream with a different profile (or echo
+count) is picked up automatically or rejected loudly, never mis-read.
 
 Everything TensorRT does runs in the same CUDA (primary) context CUDA.jl
 uses, which is what makes raw `CuArray` pointers directly bindable.
@@ -222,7 +224,7 @@ function load_tensorrt_model(;
         " — if the engine was rebuilt against a different TensorRT version, " *
         "install the matching system TensorRT and re-run deps/tensorrt/build_shim.sh.")
 
-    empty() = CUDA.CuMatrix{Float32}(undef, 0, 0)
+    empty() = CUDA.CuMatrix{ComplexF32}(undef, 0, 0)
     m = TensorRTModel(h, api, 0, 0, 0, 0, 0,
                       CUDA.CuMatrix{Float32}(undef, 3, 0), empty(), empty(), empty(),
                       use_graph, false)
@@ -247,11 +249,12 @@ function load_tensorrt_model(;
     xdims = _engine_shape(api, h, "x")
     (length(xdims) == 2 && xdims[2] == 3) || error(
         "engine input x has TensorRT shape $xdims, expected (batch, 3) = " *
-        "[log T₁, log T₂, B₁] per voxel")
+        "physical [T₁, T₂, B₁] per voxel")
     sdims = _engine_shape(api, h, "signal")
-    (length(sdims) == 2 && sdims[2] ≥ 2 && iseven(sdims[2])) || error(
-        "engine output signal has TensorRT shape $sdims, expected (batch, 2·NTR)")
-    NTR = Int(sdims[2]) ÷ 2
+    (length(sdims) == 3 && sdims[2] ≥ 1 && sdims[3] == 2) || error(
+        "engine output signal has TensorRT shape $sdims, expected (batch, NTR, 2) " *
+        "with (Re, Im) paired on the last axis")
+    NTR = Int(sdims[2])
     for name in ("dT1", "dT2")
         d = _engine_shape(api, h, name)
         d == sdims || error(
@@ -306,12 +309,14 @@ function _bind!(m::TensorRTModel, N::Int)
 
     m.N = 0   # binding in progress: a failure below must force a clean rebind
     m.Xbuf = CUDA.CuMatrix{Float32}(undef, 3, N)
-    # Deterministic content (any finite value) rather than recycled pool
-    # bytes, so the graph-capture warm-up below computes on defined data.
-    fill!(m.Xbuf, 0.0f0)
-    m.raw_signal = CUDA.CuMatrix{Float32}(undef, 2m.NTR, N)
-    m.raw_dT1 = CUDA.CuMatrix{Float32}(undef, 2m.NTR, N)
-    m.raw_dT2 = CUDA.CuMatrix{Float32}(undef, 2m.NTR, N)
+    # Deterministic content rather than recycled pool bytes, so the
+    # graph-capture warm-up below computes on defined data. T₁ = T₂ = B₁ = 1
+    # (not 0): the engine's graph contains the model's internal log node, and
+    # a zero warm-up would push log(0) = -Inf through the whole network.
+    fill!(m.Xbuf, 1.0f0)
+    m.raw_signal = CUDA.CuMatrix{ComplexF32}(undef, m.NTR, N)
+    m.raw_dT1 = CUDA.CuMatrix{ComplexF32}(undef, m.NTR, N)
+    m.raw_dT2 = CUDA.CuMatrix{ComplexF32}(undef, m.NTR, N)
 
     # Julia's column-major (3, N) buffer is byte-identical to the row-major
     # (N, 3) tensor the engine expects — dims are simply reversed.
@@ -320,14 +325,15 @@ function _bind!(m::TensorRTModel, N::Int)
     rc == 0 || error("setInputShape(x → ($N, 3)) failed: " * _lasterr(m))
 
     # Cross-check the shapes TensorRT resolved for the outputs before trusting
-    # our buffer sizes.
+    # our buffer sizes: row-major (N, NTR, 2) FP32 — byte-identical to the
+    # column-major (NTR, N) ComplexF32 buffers allocated above.
     dims = Vector{Int64}(undef, 8)
     for name in ("signal", "dT1", "dT2")
         nd = ccall(m.api.current_shape, Int32, (Ptr{Cvoid}, Cstring, Ptr{Int64}),
                    m.h, name, dims)
-        (nd == 2 && dims[1] == N && dims[2] == 2m.NTR) || error(
+        (nd == 3 && dims[1] == N && dims[2] == m.NTR && dims[3] == 2) || error(
             "engine resolved output $name to $(Tuple(dims[1:max(nd, 0)])), " *
-            "expected ($N, $(2m.NTR))")
+            "expected ($N, $(m.NTR), 2)")
     end
 
     for (name, A) in (("x", m.Xbuf), ("signal", m.raw_signal),
@@ -360,10 +366,11 @@ function _bind!(m::TensorRTModel, N::Int)
 end
 
 # Write the network input for the current tissue parameters into the staging
-# buffer: row 1 = log T₁, row 2 = log T₂, row 3 = B₁ — the exact values the
-# network was trained on (NeuralBloch's data pipeline applies the logs and
-# nothing else). Three small GPU broadcasts on the task stream; TensorRT reads
-# the buffer in place afterwards, ordered by the stream.
+# buffer: row 1 = T₁, row 2 = T₂, row 3 = B₁ — physical units, the model's
+# public input format (the engine's exported graph applies the log to T₁/T₂
+# itself; NeuralBloch's data pipeline feeds physical values and applies no
+# normalization). Three small GPU broadcasts on the task stream; TensorRT
+# reads the buffer in place afterwards, ordered by the stream.
 function _stage!(m::TensorRTModel, parameters)
     T₁ = parameters.T₁
     T₁ isa CUDA.CuArray || throw(ArgumentError(
@@ -374,8 +381,8 @@ function _stage!(m::TensorRTModel, parameters)
     _bind!(m, N)
     X = m.Xbuf
     @views begin
-        X[1, :] .= log.(T₁)
-        X[2, :] .= log.(parameters.T₂)
+        X[1, :] .= T₁
+        X[2, :] .= parameters.T₂
         X[3, :] .= parameters.B₁
     end
     return N
@@ -396,16 +403,26 @@ end
     return nothing
 end
 
-# Combine an output's two concatenated halves [Re₁..Re_NTR | Im₁..Im_NTR]
-# (the layout frozen into the engine) into a fresh (NTR, N) complex matrix —
-# one fused device broadcast, the only copy in the whole path. Fresh because
-# the reconstruction mutates results in place (phase encoding) and results
-# from successive calls must not alias.
-function _combine(m::TensorRTModel, raw::CUDA.CuMatrix{Float32}, N::Int)
-    out = CUDA.CuMatrix{ComplexF32}(undef, m.NTR, N)
-    @views out .= complex.(raw[1:m.NTR, :], raw[m.NTR+1:2m.NTR, :])
-    return out
-end
+# Hand an output to the caller as a fresh (NTR, N) complex matrix — one
+# contiguous stream-ordered device memcpy, the only copy in the whole path
+# (the engine already wrote complex values into the buffer; see the header).
+#
+# The copy is unavoidable, not an implementation shortcut. Every design must
+# land each output in a fresh caller-owned array per call: the reconstruction
+# mutates results in place (phase encoding) and holds ∂echos across CG
+# iterations while the mode-0 line search keeps re-invoking compute_echos —
+# so returning the persistent buffer (or alternating between two) would let
+# a later call silently clobber a result still in use. The one zero-copy
+# alternative — binding a fresh output pointer before every call — is ruled
+# out by the CUDA graph: capture freezes the device addresses inside
+# TensorRT's kernels ("addresses changed ⇒ re-capture", costing far more
+# than the copy), so per-call rebinding would forfeit graph replay and pay
+# per-layer enqueueV3 launch overhead on every objective evaluation instead.
+# The surrogate arm pays the same per-call output write invisibly (torch
+# allocates fresh outputs each forward); here it is explicit — and cheap:
+# an async DMA transfer, no SM time, no host sync, strictly less work than
+# the halves→complex gather kernel the old engine layout forced.
+_combine(raw::CUDA.CuMatrix{ComplexF32}) = copy(raw)
 
 # --- the interface implementation --------------------------------------------
 
@@ -422,9 +439,9 @@ always computes all three outputs — so this costs the same as
 left in their raw buffers.
 """
 function compute_echos(m::TensorRTModel, parameters)
-    N = _stage!(m, parameters)
+    _stage!(m, parameters)
     _infer!(m)
-    return _combine(m, m.raw_signal, N)
+    return _combine(m.raw_signal)
 end
 
 """
@@ -437,10 +454,10 @@ invocation. `∂echos` is the usual `(nechos(m), N)` `StructArray` over the two
 derivative matrices with element type `∂mˣʸ∂T₁T₂{ComplexF32}`.
 """
 function compute_echos_and_derivatives(m::TensorRTModel, parameters)
-    N = _stage!(m, parameters)
+    _stage!(m, parameters)
     _infer!(m)
-    echos = _combine(m, m.raw_signal, N)
-    ∂T₁ = _combine(m, m.raw_dT1, N)
-    ∂T₂ = _combine(m, m.raw_dT2, N)
+    echos = _combine(m.raw_signal)
+    ∂T₁ = _combine(m.raw_dT1)
+    ∂T₂ = _combine(m.raw_dT2)
     return echos, StructArray{∂mˣʸ∂T₁T₂{ComplexF32}}((∂T₁, ∂T₂))
 end

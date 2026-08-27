@@ -54,11 +54,12 @@ end
     params = random_parameters(rng, TRT.minB)
 
     @test size(compute_echos(TRT, params), 2) == TRT.minB
-    # The staged rows are [log T₁; log T₂; B₁], computed with the same GPU
-    # broadcast — exact equality, as in the surrogate staging tests.
-    @test maximum(abs, Array(TRT.Xbuf[1, :]) .- Array(log.(params.T₁))) == 0
-    @test maximum(abs, Array(TRT.Xbuf[2, :]) .- Array(log.(params.T₂))) == 0
-    @test maximum(abs, Array(TRT.Xbuf[3, :]) .- Array(params.B₁)) == 0
+    # The staged rows are the physical [T₁; T₂; B₁] — the engine's exported
+    # graph applies the log itself — so staging is a plain copy and exact
+    # equality holds, as in the surrogate staging tests.
+    @test Array(TRT.Xbuf[1, :]) == Array(params.T₁)
+    @test Array(TRT.Xbuf[2, :]) == Array(params.T₂)
+    @test Array(TRT.Xbuf[3, :]) == Array(params.B₁)
 
     # Same voxel count → buffers are reused, not reallocated or rebound.
     buf = TRT.Xbuf
