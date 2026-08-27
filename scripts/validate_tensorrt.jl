@@ -5,7 +5,7 @@
 #   julia --project=. scripts/validate_tensorrt.jl
 #
 # Prerequisites: the shim (deps/tensorrt/build_shim.sh) and the engine
-# (../NeuralBloch/outputs/model.engine, built there).
+# (models/model.engine — built in NeuralBloch, copied in by bootstrap.sh).
 #
 # Five parts:
 #
@@ -211,7 +211,7 @@ end
 CUDA.synchronize()
 
 @printf("  engine alone (graph replay)          : %8.2f ms\n", 1000t_engine)
-@printf("  forward model, graph                 : %8.2f ms  (stage + engine + combine ×3)\n", 1000t_full_graph)
+@printf("  forward model, graph                 : %8.2f ms  (stage + engine + copy ×3)\n", 1000t_full_graph)
 @printf("  forward model, enqueueV3             : %8.2f ms\n", 1000t_full_enq)
 if surrogate !== nothing
     compute_echos_and_derivatives(surrogate, parameters); CUDA.synchronize()

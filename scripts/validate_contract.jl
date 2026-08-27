@@ -43,10 +43,11 @@ JA = from_torch(tA)
 @assert UInt(pointer(JA)) == UInt(pointer(A)) "boundary round trip copied (real path)"
 @assert size(JA) == size(A)
 
-# (b) The complex output recipe: (N, 2·NTR) real row-major, viewed as
-# complex pairs, must come back as the (NTR, N) ComplexF32 matrix that
-# aliases the same bytes — i.e. exactly reinterpret(ComplexF32, ·) of the
-# Julia-side original.
+# (b) The complex output recipe: a row-major (N, NTR, 2) tensor of (Re, Im)
+# pairs — the layout the model's decoders emit natively, built here by
+# viewing a raw tensor — viewed as complex, must come back as the (NTR, N)
+# ComplexF32 matrix that aliases the same bytes — i.e. exactly
+# reinterpret(ComplexF32, ·) of the Julia-side original.
 tm = torch()
 raw = CUDA.rand(Float32, 8, 5)                     # Julia (2·NTR, N) = (8, 5)
 traw = to_torch(raw; layout = :reversed)           # torch (5, 8) contiguous
