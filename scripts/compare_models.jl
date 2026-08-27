@@ -58,17 +58,35 @@
 # every practical purpose, and it makes the surrogate-vs-tensorrt walls a
 # same-problem comparison). Its reports append after the two-arm tables,
 # which stay exactly as they are without it.
+#
+# A fourth arm — the same checkpoint through the naive PythonCall baseline
+# (PythonModel) — is the comparison's *zero point*. It runs the identical
+# weights through the identical torch kernels, so it too reconstructs the
+# surrogate arm's raw data, and it agrees with that arm bitwise rather than
+# to 1e-7: numerically it *is* the surrogate. Everything that separates them
+# is data plumbing — ordinary conversions and host round trips instead of
+# zero-copy crossings — which is what makes the pair a clean measurement of
+# what the bridge buys, and what the "where the milliseconds go" breakdown
+# below decomposes stage by stage.
 
 ENV["MPLBACKEND"] = "Agg"   # matplotlib without a display; must precede PythonPlot
 
 using MRSTAT
 using NeuralBloch   # activates the surrogate's package extension
 using MRSTAT.TrustRegionReflective: SolverOptions, solver
+# The python baseline's crossing stages, timed individually in the
+# "where the milliseconds go" section — the same functions its
+# compute_echos_and_derivatives composes, so the breakdown cannot drift
+# from what the arm actually runs.
+using MRSTAT.ForwardModels: _py_host_input, _py_device_input, _py_forward,
+                            _py_forward_signal, _py_to_host, _py_to_julia,
+                            _py_pair_to_complex, _py_upload
 using BlochSimulators
 using ComputationalResources: CUDALibs
 using CUDA
 using StructArrays
 using Statistics
+using LinearAlgebra: norm
 using Printf
 using Logging: NullLogger, with_logger
 using PythonPlot
@@ -81,6 +99,12 @@ mkpath(OUTDIR)
 # ---------------------------------------------------------------------------
 
 surrogate = load_surrogate()
+
+# The baseline arm: the same checkpoint, reached by ordinary PythonCall
+# conversions instead of the zero-copy bridge. Needs nothing the surrogate
+# does not already need, so it is never guarded.
+pybase = load_python_model()
+@assert nechos(pybase) == nechos(surrogate)
 
 # The training sequence, reproduced from NeuralBloch's data_generation.jl +
 # config/data.yaml (frozen for this checkpoint): FISP3D with the repo's RF
@@ -208,6 +232,107 @@ if tensorrt !== nothing
     @printf("  tensorrt  : %8.1f ms  (%.1f× vs Bloch, %.2f× vs surrogate)\n",
             1000t_fwd_trt, t_fwd_blo / t_fwd_trt, t_fwd_sur / t_fwd_trt)
 end
+compute_echos_and_derivatives(pybase, params_true); CUDA.synchronize()
+t_fwd_py = CUDA.@elapsed compute_echos_and_derivatives(pybase, params_true)
+@printf("  python    : %8.1f ms  (%.2f× vs Bloch, %.1f× slower than the surrogate%s)\n",
+        1000t_fwd_py, t_fwd_blo / t_fwd_py, t_fwd_py / t_fwd_sur,
+        tensorrt === nothing ? "" :
+            @sprintf(", %.1f× than tensorrt", t_fwd_py / t_fwd_trt))
+
+# ---------------------------------------------------------------------------
+# Speed level 1b: where the python baseline's milliseconds go
+# ---------------------------------------------------------------------------
+#
+# The baseline is the same network as the surrogate arm, weight for weight and
+# kernel for kernel; everything between them is data plumbing. This section
+# times that plumbing stage by stage — the very functions the model composes,
+# so the breakdown cannot drift from what the arm runs — and checks the parts
+# against the whole.
+#
+# Each stage is measured as wall clock with both runtimes synchronized either
+# side (torch queues on its own stream, CUDA.jl on the task stream), median of
+# seven, after a warm call. Wall clock rather than CUDA events because most of
+# these stages are host work: a conversion loop and a memcpy have no kernel to
+# put an event around.
+
+println("═"^72)
+println("Speed level 1b: where the python baseline's milliseconds go")
+println("═"^72)
+
+const TM = pybase.torch
+syncboth() = (CUDA.synchronize(); TM.cuda.synchronize(); nothing)
+function stage_ms(f; n = 7)
+    f(); syncboth()                       # warm, and flush anything queued
+    ts = map(1:n) do _
+        syncboth()
+        @elapsed begin; f(); syncboth(); end
+    end
+    return 1000 * median(ts)
+end
+
+nvox = length(params_true)
+Xhost = _py_host_input(pybase, params_true)
+xdev = _py_device_input(pybase, Xhost)
+outs = _py_forward(pybase, xdev)
+anp = _py_to_host(outs[0])
+ajl = _py_to_julia(anp)
+hmat = _py_pair_to_complex(ajl)
+
+t_s1 = stage_ms(() -> _py_host_input(pybase, params_true))
+t_s2 = stage_ms(() -> _py_device_input(pybase, Xhost))
+t_s3 = stage_ms(() -> _py_forward(pybase, xdev))
+t_s3sig = stage_ms(() -> _py_forward_signal(pybase, xdev))
+t_s4 = stage_ms(() -> _py_to_host(outs[0]))
+t_s5 = stage_ms(() -> _py_to_julia(anp))
+t_s6 = stage_ms(() -> _py_pair_to_complex(ajl))
+t_s7 = stage_ms(() -> _py_upload(hmat))
+t_call = stage_ms(() -> compute_echos_and_derivatives(pybase, params_true); n = 5)
+t_call0 = stage_ms(() -> compute_echos(pybase, params_true); n = 5)
+
+out_bytes = nvox * nechos(pybase) * 2 * sizeof(Float32) / 2^20   # MiB per output
+@printf("  %d voxels × %d echos: %.1f MiB per network output, ×3 outputs\n\n",
+        nvox, nechos(pybase), out_bytes)
+@printf("  %-46s %9s %8s\n", "stage (per compute_echos_and_derivatives call)", "ms", "% call")
+row(label, ms, mult) = @printf("  %-46s %9.1f %7.1f%%\n", label, mult * ms,
+                               100 * mult * ms / t_call)
+row("1. GPU params → host (N,3) Float32 matrix", t_s1, 1)
+row("2. → numpy copy → torch → .cuda()", t_s2, 1)
+row("3. network forward (3 heads, GPU)", t_s3, 1)
+row("4. output → host: .detach().cpu().numpy()  ×3", t_s4, 3)
+row("5. numpy → Julia: pyconvert(Array{F32,3})  ×3", t_s5, 3)
+row("6. (Re,Im) pairs → (NTR,N) ComplexF32      ×3", t_s6, 3)
+row("7. host → device: CuArray upload           ×3", t_s7, 3)
+@printf("  %-46s %9.1f %7.1f%%\n", "── sum of stages",
+        t_s1 + t_s2 + t_s3 + 3(t_s4 + t_s5 + t_s6 + t_s7),
+        100 * (t_s1 + t_s2 + t_s3 + 3(t_s4 + t_s5 + t_s6 + t_s7)) / t_call)
+@printf("  %-46s %9.1f %7.1f%%\n", "── measured whole call (median of 5)", t_call, 100.0)
+# The stages do not quite sum to the whole call, and the gap has a name. One
+# full call allocates most of a gigabyte of host memory — three numpy buffers,
+# three Julia copies, three interleaved matrices, three transposes — and what
+# that costs (faulting in fresh pages, and the garbage collection the pressure
+# triggers) is charged to the call, not to any stage measured in isolation
+# with its buffers already warm. Mode 0 allocates a third as much, and its
+# stages do sum. Measured rather than asserted:
+let n = 5, bytes = 0.0, gc = 0.0, tot = 0.0
+    compute_echos_and_derivatives(pybase, params_true); syncboth()
+    for _ in 1:n
+        st = @timed (compute_echos_and_derivatives(pybase, params_true); syncboth())
+        bytes += st.bytes; gc += st.gctime; tot += st.time
+    end
+    @printf("  %-46s %9.0f MiB, %.0f ms (%.0f%%) in GC\n",
+            "── host memory allocated per call", bytes / n / 2^20, 1000gc / n,
+            100gc / tot)
+end
+println()
+@printf("  %-46s %9.1f ms\n", "same, compute_echos (mode-0, 1 output)", t_call0)
+@printf("  %-46s %9.1f ms\n", "  └ sum of its stages",
+        t_s1 + t_s2 + t_s3sig + t_s4 + t_s5 + t_s6 + t_s7)
+@printf("  %-46s %9.1f ms\n", "  └ network forward, signal head only", t_s3sig)
+println()
+@printf("  data actually moved per full call: %.0f MiB device→host, %.0f MiB host→device\n",
+        3 * out_bytes, 3 * out_bytes)
+@printf("  the same numbers cross the surrogate arm's boundary in %.1f ms — as pointers.\n",
+        1000t_fwd_sur)
 
 # ---------------------------------------------------------------------------
 # The two reconstructions (same bounds: the surrogate's trained box)
@@ -239,6 +364,7 @@ t_warm = @elapsed begin
     warmup!(surrogate, raw_sur)
     warmup!(bloch, raw_bloch)
     tensorrt === nothing || warmup!(tensorrt, raw_sur)
+    warmup!(pybase, raw_sur)
 end
 @printf("  done in %.1f s — compilation only, excluded from every number below.\n", t_warm)
 
@@ -260,6 +386,11 @@ if tensorrt !== nothing
         instrumented_recon(tensorrt, raw_sur; x0, LB, UB)
 end
 
+println("═"^72)
+println("Reconstruction D: PythonModel (the surrogate arm's data — bitwise same model)")
+println("═"^72)
+out_py, calls_py, wall_py = instrumented_recon(pybase, raw_sur; x0, LB, UB)
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
@@ -276,11 +407,35 @@ if tensorrt !== nothing
     Δtrt = 100 * median(abs.(maps_trt.T₁ .- maps_sur.T₁) ./ maps_sur.T₁)
     @printf("  arm-vs-arm: median |T₁(tensorrt) − T₁(surrogate)| / T₁(surrogate) = %.3f%%\n", Δtrt)
 end
+maps_py = report_accuracy(out_py, "python")
+Δpy = 100 * median(abs.(maps_py.T₁ .- maps_sur.T₁) ./ maps_sur.T₁)
+@printf("  arm-vs-arm: median |T₁(python) − T₁(surrogate)| / T₁(surrogate) = %.3f%%\n", Δpy)
+
+# The claim the baseline arm rests on, measured directly rather than inferred
+# from two reconstructions: on one set of identical Float32 inputs, the
+# baseline and the surrogate produce the same bits. They run the same weights
+# through the same torch kernels, so anything else would mean a crossing is
+# not numerically transparent.
+let
+    e_py, ∂_py = compute_echos_and_derivatives(pybase, params_true)
+    e_su, ∂_su = compute_echos_and_derivatives(surrogate, params_true)
+    nrmse(a, b) = norm(vec(a) .- vec(b)) / norm(vec(b))
+    mx(a, b) = maximum(abs, Array(a) .- Array(b))
+    @printf("  python-vs-surrogate on identical inputs (%d voxels × %d echos):\n",
+            length(params_true), nechos(pybase))
+    @printf("    max |Δ| signal / ∂T₁ / ∂T₂ : %g / %g / %g\n",
+            mx(e_py, e_su), mx(∂_py.∂T₁, ∂_su.∂T₁), mx(∂_py.∂T₂, ∂_su.∂T₂))
+    @printf("    NRMSE  signal / ∂T₁ / ∂T₂ : %g / %g / %g\n",
+            nrmse(Array(e_py), Array(e_su)),
+            nrmse(Array(∂_py.∂T₁), Array(∂_su.∂T₁)),
+            nrmse(Array(∂_py.∂T₂), Array(∂_su.∂T₂)))
+end
 
 save_maps(T₁true, T₂true, ρtrue, "ground truth")
 save_maps(maps_sur..., "surrogate")
 save_maps(maps_blo..., "Bloch")
 tensorrt === nothing || save_maps(maps_trt..., "tensorrt")
+save_maps(maps_py..., "python")
 println("  maps written to $OUTDIR")
 
 println("═"^72)
@@ -332,6 +487,26 @@ if tensorrt !== nothing
     @printf("  %-36s %10.2f×\n", "end-to-end vs the surrogate arm", wall_sur / wall_trt)
 end
 println()
+@printf("  %-36s %12s\n", "the python baseline", "python")
+@printf("  %-36s %10.1f ms\n", "median mode-0 objective call", level2(calls_py, 0))
+@printf("  %-36s %10.1f ms\n", "median mode-2 objective call", level2(calls_py, 2))
+@printf("  %-36s %9d/%-3d\n", "objective calls (mode 0/mode 2)",
+        count_mode(calls_py, 0), count_mode(calls_py, 2))
+@printf("  %-36s %10.1f s\n", "time inside the objective (total)", objtotal(calls_py))
+@printf("  %-36s %10.1f s\n", "  └ expected: medians × call counts", medianfit(calls_py))
+@printf("  %-36s %10.1f s\n", "time in solver internals (H·v, CG)", wall_py - objtotal(calls_py))
+@printf("  %-36s %10.1f s\n", "end-to-end reconstruction", wall_py)
+@printf("  %-36s %10.2f×\n", "end-to-end vs Bloch", wall_blo / wall_py)
+@printf("  %-36s %10.2f×\n", "the surrogate arm's speedup over it", wall_py / wall_sur)
+if tensorrt !== nothing
+    @printf("  %-36s %10.2f×\n", "the tensorrt arm's speedup over it", wall_py / wall_trt)
+end
+# What the baseline's plumbing costs the *solver*, not the forward model: it
+# is the same model as the surrogate arm, so their objective totals differ by
+# nothing but crossings.
+@printf("  %-36s %10.1f s\n", "plumbing tax vs the surrogate arm",
+        objtotal(calls_py) - objtotal(calls_sur))
+println()
 println("  Reading the numbers: the surrogate makes the forward model ~",
         round(Int, t_fwd_blo / t_fwd_sur), "× faster, which shows directly in the")
 println("  objective calls. End-to-end walls are dominated by the solver internals —")
@@ -349,6 +524,14 @@ if tensorrt !== nothing
     println("  and the single-graph-launch hot path; what it cannot buy is anything in")
     println("  the shared solver internals — the same Amdahl ceiling as above.")
 end
+println()
+println("  The python arm is the baseline: the same checkpoint, the same torch kernels,")
+println("  the same GPU — and bitwise the same numbers — reached by ordinary conversions")
+println("  and host round trips instead of the zero-copy bridge. Its gap to the surrogate")
+println("  arm is therefore not a modelling difference or a compute difference; it is the")
+println("  cost of moving data across the language boundary, itemized in level 1b. Read")
+println("  the surrogate and tensorrt numbers against it rather than against Bloch to see")
+println("  what the bridge and the engine buy on top of \"run the same network on the GPU\".")
 
 println()
 println("compare_models finished")
