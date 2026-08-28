@@ -12,7 +12,7 @@ StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [sources]
-# The suite exercises all three forward models, so it needs the (unregistered)
+# The suite exercises all four forward models, so it needs the (unregistered)
 # NeuralBloch.jl bridge — expected as a sibling checkout, like the artifacts.
 NeuralBloch = {path = "../../NeuralBloch.jl"}
 

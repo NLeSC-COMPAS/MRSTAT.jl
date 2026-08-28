@@ -5,11 +5,11 @@
 #   ./scripts/compare_models_N.sh [output-directory]
 #   MRSTAT_N_LIST="120 200" ./scripts/compare_models_N.sh /tmp/sweep
 #
-# Sizes default to 120 100 150 200: N=120 first, because it is the size
-# scripts/compare_models.jl reports and therefore the run that says whether this
-# machine is behaving as it did when the baseline numbers were taken. The sizes
-# are exactly those that divide the checkpoint's 600 readouts into an integral
-# number K = 600/N of phase-encode cycles.
+# Sizes default to 120 100 150 200: N=120 first, because it is the size the
+# README's reference numbers were taken at, so its run says whether this machine
+# is behaving as it did then. The sizes are exactly those that divide the
+# checkpoint's 600 readouts into an integral number K = 600/N of phase-encode
+# cycles.
 #
 # Each size gets its own process (see the script's header) and its own log; a
 # size that fails does not stop the sweep, so the surviving sizes still produce

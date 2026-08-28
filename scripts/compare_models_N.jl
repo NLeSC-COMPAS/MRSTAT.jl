@@ -1,5 +1,5 @@
-# The four-arm forward-model comparison of scripts/compare_models.jl, run at one
-# phantom size N and written to disk as machine-readable results.
+# The four-arm forward-model comparison, run at one phantom size N and written
+# to disk as machine-readable results.
 #
 # Run with:
 #   source env.sh                                   # binds PythonCall to the torch venv
@@ -44,14 +44,14 @@
 # phantom, not the phantom. The drawn values are recorded in the results file
 # (phantom.T₁_values …) so the claim is checkable rather than asserted.
 #
-# Everything else — arms, warm-up discipline, the three speed levels, the
-# accuracy and parity checks — is scripts/compare_models.jl's, deliberately
-# unchanged, so a point of this sweep is directly comparable with that script's
-# N=120 baseline. The differences are that every timing is a median of several
-# samples with all samples kept, that a few extra quantities are recorded
-# (mode-0 forward per arm, host allocation per arm, GPU memory marks, the
-# TensorRT-vs-surrogate parity, per-call time series), and that nothing is
-# plotted.
+# The arms, the warm-up discipline, the three speed levels and the accuracy and
+# parity checks are those of the original single-size (N=120) comparison this
+# script superseded, unchanged, so a point of this sweep is directly comparable
+# with that baseline. What is added is what a sweep needs and a single run did
+# not: every timing is a median of several samples with all samples kept, a few
+# extra quantities are recorded (mode-0 forward per arm, host allocation per
+# arm, GPU memory marks, the TensorRT-vs-surrogate parity, per-call time
+# series), and nothing is plotted.
 
 ENV["MPLBACKEND"] = "Agg"   # matplotlib without a display; must precede PythonPlot
 
@@ -178,8 +178,8 @@ pybase = load_python_model()
 @assert nechos(pybase) == nechos(surrogate)
 
 # The training sequence, reproduced from NeuralBloch's data_generation.jl +
-# config/data.yaml (frozen for this checkpoint) — the same lines
-# compare_models.jl runs.
+# config/data.yaml (frozen for this checkpoint) — the same lines the
+# validation scripts rebuild it from.
 neuralbloch_dir = neuralbloch_repo()
 readvec(p) = [parse(Float64, l) for l in eachline(p) if !isempty(strip(l))]
 flip_deg = readvec(joinpath(neuralbloch_dir, "data", "rf_data", "rf_angle_list.txt"))
@@ -267,7 +267,7 @@ mem_mark!("data generated")
 const TM = pybase.torch
 syncboth() = (CUDA.synchronize(); TM.cuda.synchronize(); nothing)
 
-# Level 1's definition, from compare_models.jl: a warm call, then CUDA events
+# Level 1's definition, kept from the single-size comparison: a warm call, then CUDA events
 # around the call. Repeated here and reduced by the median, with every sample
 # kept in the results file — one sample is what the N=120 baseline reported and
 # it is enough to be misled by a single GC pause. The wall clock around the
@@ -342,7 +342,7 @@ torch_mem() = Dict{String,Any}(
     "torch_reserved_MiB"  => pyconvert(Float64, TM.cuda.memory_reserved()) / 2^20,
     "torch_peak_MiB"      => pyconvert(Float64, TM.cuda.max_memory_allocated()) / 2^20)
 
-# The arms, in compare_models.jl's execution order. (The reports order them
+# The arms, in the single-size comparison's execution order. (The reports order them
 # python → Bloch → surrogate → TensorRT; execution order is kept as the
 # baseline ran it so a point of this sweep is comparable with that run.)
 arms = Any[("surrogate", surrogate), ("bloch", bloch)]
@@ -493,7 +493,8 @@ if SKIP_RECON
 end
 
 # ---------------------------------------------------------------------------
-# Instrumented reconstruction (compare_models.jl's, verbatim)
+# Instrumented reconstruction: the same lines mrstat_recon runs, with the
+# objective wrapped for per-call timing (no package changes needed)
 # ---------------------------------------------------------------------------
 
 function instrumented_recon(model, raw; x0, LB, UB, options = SolverOptions())

@@ -111,7 +111,8 @@ chosen forward model:
   reference the other two learned models are measured against.
 
 All use the same 120×120 phantom geometry, so the forward models can be
-compared like for like (`scripts/compare_models.jl` does exactly that).
+compared like for like (`scripts/compare_models_N.jl` does exactly that,
+at this and other phantom sizes).
 """
 function example_mrstat_recon(kind::Symbol = :bloch)
     N, K = 120, 5

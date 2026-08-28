@@ -33,7 +33,7 @@
 #
 #   5. A complete self-consistent reconstruction through mrstat_recon — the
 #      whole solver running against the TensorRT model, gated on recovering
-#      the phantom (accuracy only; timing belongs to compare_models.jl).
+#      the phantom (accuracy only; timing belongs to compare_models_N.jl).
 
 using MRSTAT
 using BlochSimulators
@@ -228,7 +228,7 @@ println("═"^70)
 
 raw, coordinates, coils, trajectory, transmit_field, phantom = generate_synthetic_data(m)
 # The solver narrates every iteration; none of that is a result here, so it
-# goes to devnull (the same treatment compare_models.jl gives its warm-up).
+# goes to devnull (the same treatment compare_models_N.jl gives its warm-up).
 output = redirect_stdout(devnull) do
     with_logger(NullLogger()) do
         mrstat_recon(raw, m, coordinates, coils, trajectory, transmit_field)

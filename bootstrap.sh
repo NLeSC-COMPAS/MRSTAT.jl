@@ -189,8 +189,8 @@ if [ "$bad" -eq 0 ]; then
 Ready. Every session from now on:
 
     source env.sh
-    julia --project=. -e 'using Pkg; Pkg.test()'      # 169 tests
-    julia --project=. scripts/compare_models.jl       # the comparison
+    julia --project=. -e 'using Pkg; Pkg.test()'      # 225 tests
+    ./scripts/compare_models_N.sh                     # the four-arm comparison across phantom sizes (~1 h)
 EOF
 else
     echo

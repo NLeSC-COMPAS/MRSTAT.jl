@@ -223,7 +223,7 @@ end
 # --- the crossings, one ordinary step at a time --------------------------------
 #
 # Each stage is its own small function: the reconstruction just composes them,
-# and `scripts/compare_models.jl` times them individually to show where the
+# and `scripts/compare_models_N.jl` times them individually to show where the
 # baseline's milliseconds go. They are internal (not exported) — the model's
 # public surface is the ForwardModel interface.
 
