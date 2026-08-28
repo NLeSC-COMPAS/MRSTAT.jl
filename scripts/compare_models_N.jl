@@ -315,6 +315,28 @@ function alloc_stats(f; n = 3)
                             "gc_fraction" => sum(gc) / sum(tot))
 end
 
+# Hand every cached byte back to the driver, between measured sections.
+#
+# Three allocators share the card and only one of them yields to the others:
+# CUDA.jl's pool releases on demand, but torch's caching allocator holds
+# whatever its largest call needed until it is told otherwise, and TensorRT's
+# scratch is fixed at load. At N=200 one network output is 183 MiB and a
+# level-1 arm makes a dozen of them, so an arm that starts after torch has
+# cached 8 GiB finds a full card and dies — measured, not hypothesized: the
+# first run of this sweep lost the python arm at N=200 to exactly that, with
+# CUDA.jl's own pool holding barely a gigabyte of the 10.5 GiB in use.
+#
+# Called only between arms and between sections, never inside a timed region,
+# and every arm re-warms before its samples — so this costs measurements
+# nothing, and it makes each arm's memory marks its own footprint instead of
+# the running total of everyone before it.
+function release_gpu!()
+    GC.gc()
+    CUDA.reclaim()
+    TM.cuda.empty_cache()
+    return nothing
+end
+
 torch_mem() = Dict{String,Any}(
     "torch_allocated_MiB" => pyconvert(Float64, TM.cuda.memory_allocated()) / 2^20,
     "torch_reserved_MiB"  => pyconvert(Float64, TM.cuda.memory_reserved()) / 2^20,
@@ -368,15 +390,8 @@ for (name, model) in arms
         mem_mark!("level1 $name")
         save_results()
     end
-    # Hand the pool back between arms, untimed. Three allocators share one
-    # 11 GiB card — CUDA.jl's pool, torch's caching allocator and TensorRT's
-    # scratch — and only CUDA.jl's grows by holding freed blocks: at N=200 the
-    # echo matrices alone are 192 MiB apiece, so a pool left full would starve
-    # whichever arm runs next of memory it cannot ask CUDA.jl for. Every arm
-    # re-warms before its samples, so this costs measurements nothing, and it
-    # makes each arm's memory marks its own footprint rather than the running
-    # total of everyone before it.
-    GC.gc(); CUDA.reclaim()
+    # Hand every allocator's cache back between arms (see release_gpu!).
+    release_gpu!()
 end
 sect("memory")["torch_after_level1"] = torch_mem()
 save_results()
@@ -465,7 +480,7 @@ attempt("parity", "learned") do
     end
     save_results()
 end
-GC.gc(); CUDA.reclaim()
+release_gpu!()
 mem_mark!("parity done")
 save_results()
 
@@ -527,7 +542,7 @@ t_warm = @elapsed for (name, model) in arms
 end
 @printf("  done in %.1f s — compilation only, excluded from every number below.\n", t_warm)
 meta["warmup_seconds"] = t_warm
-GC.gc(); CUDA.reclaim()
+release_gpu!()
 mem_mark!("warm-up done")
 save_results()
 
@@ -592,7 +607,7 @@ for (name, model) in arms
         mem_mark!("recon $name")
         merge!(d, torch_mem())
         save_results()
-        GC.gc(); CUDA.reclaim()
+        release_gpu!()
     end
 end
 
